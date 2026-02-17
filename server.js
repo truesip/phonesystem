@@ -1996,7 +1996,8 @@ async function initDb() {
     { name: 'campaign_audio_blob', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN campaign_audio_blob LONGBLOB NULL" },
     { name: 'campaign_audio_filename', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN campaign_audio_filename VARCHAR(255) NULL" },
     { name: 'campaign_audio_mime', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN campaign_audio_mime VARCHAR(128) NULL" },
-    { name: 'campaign_audio_size', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN campaign_audio_size BIGINT NULL" }
+    { name: 'campaign_audio_size', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN campaign_audio_size BIGINT NULL" },
+    { name: 'updated_at', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" }
   ]) {
     try {
       const [rows] = await pool.query(
