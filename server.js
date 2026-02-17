@@ -4229,10 +4229,10 @@ app.post('/api/admin/users/:id/adjust-balance', requireAdmin, async (req, res) =
     
     if (DEBUG) console.log('[admin.adjust-balance]', { userId, amount, description, result, by: req.session.userId });
     
-    if (!result || !result.ok) {
-      const reason = result?.reason === 'insufficient_funds' 
+    if (!result || !result.success) {
+      const reason = result?.error === 'insufficient_funds' 
         ? 'Insufficient balance for deduction' 
-        : (result?.reason || 'Balance adjustment failed');
+        : (result?.error || 'Balance adjustment failed');
       return res.status(500).json({ success: false, message: reason });
     }
     
