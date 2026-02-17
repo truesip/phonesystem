@@ -755,7 +755,7 @@
     <div class="header-right">
       <div id="noticeable-widget"></div>
       <span id="currentBalance" class="header-balance"></span>
-      <button id="addFundBtn" class="btn--primary">➕ Add Funds</button>
+      <button id="addFundBtn" type="button" class="btn--primary" onclick="if(window.__addFundsFallback&&window.__addFundsFallback.openModal){window.__addFundsFallback.openModal();}">➕ Add Funds</button>
       <form style="display:inline" method="post" action="/logout"><button type="submit">Logout</button></form>
     </div>
   </header>
@@ -1297,11 +1297,132 @@
         </div>
         <div id="fundStatus" style="display:none;margin-bottom:10px;font-size:12px;color:#dc2626"></div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
-          <button id="cancelFundBtn" class="btn--muted">Cancel</button>
-          <button id="confirmFundBtn" class="btn--primary">Continue</button>
+          <button id="cancelFundBtn" type="button" class="btn--muted" onclick="if(window.__addFundsFallback&&window.__addFundsFallback.closeModal){window.__addFundsFallback.closeModal();}">Cancel</button>
+          <button id="confirmFundBtn" type="button" class="btn--primary" onclick="if(!window.__addFundsReady&&window.__addFundsFallback&&window.__addFundsFallback.submit){window.__addFundsFallback.submit();return false;}">Continue</button>
         </div>
       </div>
     </div>
+    <script>
+      (function addFundsFallbackBootstrap(){
+        function byId(id){ return document.getElementById(id); }
+        function openModal(){
+          const m = byId('addFundModal');
+          if (m) m.style.display = 'flex';
+          const amount = byId('fundAmount');
+          if (amount) {
+            amount.value = '';
+            try { amount.focus(); } catch {}
+          }
+          const status = byId('fundStatus');
+          if (status) { status.style.display = 'none'; status.textContent = ''; }
+        }
+        function closeModal(){
+          const m = byId('addFundModal');
+          if (m) m.style.display = 'none';
+        }
+        function selectedMethod(){
+          const checked = document.querySelector('input[name="fundMethod"]:checked');
+          return checked ? String(checked.value || '') : 'card';
+        }
+        function methodLabel(method){
+          const m = String(method || '').trim().toLowerCase();
+          if (m === 'crypto') return 'Crypto';
+          if (m === 'ach') return 'ACH';
+          return 'Card';
+        }
+        async function submit(){
+          const amountEl = byId('fundAmount');
+          const statusEl = byId('fundStatus');
+          const confirmBtn = byId('confirmFundBtn');
+          if (statusEl) { statusEl.style.display = 'none'; statusEl.textContent = ''; }
+
+          const amount = parseFloat(amountEl && amountEl.value ? amountEl.value : '');
+          const min = Number(amountEl && amountEl.getAttribute('min') ? amountEl.getAttribute('min') : 0);
+          const max = Number(amountEl && amountEl.getAttribute('max') ? amountEl.getAttribute('max') : 0);
+          if (!amount || !Number.isFinite(amount)) {
+            alert('Please enter a valid amount.');
+            return;
+          }
+          if ((Number.isFinite(min) && min > 0 && amount < min) || (Number.isFinite(max) && max > 0 && amount > max)) {
+            alert(`Amount must be between $${Number(min || 0).toFixed(2)} and $${Number(max || 0).toFixed(2)}.`);
+            return;
+          }
+
+          const method = selectedMethod();
+          const endpoint = method === 'crypto'
+            ? '/api/me/nowpayments/checkout'
+            : method === 'ach'
+              ? '/api/me/ach/checkout'
+              : '/api/me/card/checkout';
+          const label = methodLabel(method);
+
+          if (confirmBtn) {
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = `Redirecting to ${label}...`;
+          }
+          try {
+            const r = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ amount })
+            });
+            const j = await r.json().catch(() => null);
+            if (!r.ok || !j || j.success === false) {
+              const msg = (j && j.message) ? j.message : `${label} payment could not be started. Please try again.`;
+              if (statusEl) { statusEl.textContent = msg; statusEl.style.display = 'block'; }
+              alert(msg);
+              return;
+            }
+            if (j.payment_url) {
+              window.location.href = j.payment_url;
+              return;
+            }
+            const okMsg = j.message || 'Payment started. Your balance will update after confirmation.';
+            if (statusEl) { statusEl.textContent = okMsg; statusEl.style.display = 'block'; }
+            closeModal();
+          } catch (e) {
+            const msg = 'Failed to start payment. Please try again.';
+            if (statusEl) { statusEl.textContent = msg; statusEl.style.display = 'block'; }
+            alert(msg);
+          } finally {
+            if (confirmBtn) {
+              confirmBtn.disabled = false;
+              confirmBtn.textContent = 'Continue';
+            }
+          }
+        }
+
+        function bindIfNeeded(){
+          if (window.__addFundsReady) return;
+          const openBtn = byId('addFundBtn');
+          const cancelBtn = byId('cancelFundBtn');
+          const confirmBtn = byId('confirmFundBtn');
+          const modal = byId('addFundModal');
+
+          if (openBtn && !openBtn.dataset.addFundsFallbackBound) {
+            openBtn.dataset.addFundsFallbackBound = '1';
+            openBtn.addEventListener('click', openModal);
+          }
+          if (cancelBtn && !cancelBtn.dataset.addFundsFallbackBound) {
+            cancelBtn.dataset.addFundsFallbackBound = '1';
+            cancelBtn.addEventListener('click', closeModal);
+          }
+          if (confirmBtn && !confirmBtn.dataset.addFundsFallbackBound) {
+            confirmBtn.dataset.addFundsFallbackBound = '1';
+            confirmBtn.addEventListener('click', submit);
+          }
+          if (modal && !modal.dataset.addFundsFallbackBound) {
+            modal.dataset.addFundsFallbackBound = '1';
+            modal.addEventListener('click', (e) => {
+              if (e.target === modal) closeModal();
+            });
+          }
+        }
+
+        window.__addFundsFallback = { openModal, closeModal, submit };
+        setTimeout(bindIfNeeded, 400);
+      })();
+    </script>
 
     <!-- Buy AI Number Modal -->
     <div id="buyAiNumberModal" class="ai-tool-modal">
@@ -7960,6 +8081,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         $('#confirmFundBtn').textContent = 'Continue';
       }
     });
+    window.__addFundsReady = true;
 
     // ========== Buy Numbers ==========
     let countriesData = [], regionsData = [], citiesData = [], didGroupsData = [], availableDidsData = [];
