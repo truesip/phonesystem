@@ -11630,9 +11630,10 @@ app.post('/api/me/ai/agents', requireAuth, async (req, res) => {
 
     // Persist
     const [ins] = await pool.execute(
-      'INSERT INTO ai_agents (user_id, display_name, greeting, prompt, cartesia_voice_id, background_audio_url, background_audio_gain, pipecat_agent_name, pipecat_secret_set, pipecat_region, agent_action_token_hash, agent_action_token_enc, agent_action_token_iv, agent_action_token_tag, transfer_to_number, default_doc_template_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO ai_agents (user_id, name, display_name, greeting, prompt, cartesia_voice_id, background_audio_url, background_audio_gain, pipecat_agent_name, pipecat_secret_set, pipecat_region, agent_action_token_hash, agent_action_token_enc, agent_action_token_iv, agent_action_token_tag, transfer_to_number, default_doc_template_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [
         userId,
+        name,
         name,
         String(greeting || ''),
         String(prompt || ''),
