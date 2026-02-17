@@ -868,7 +868,7 @@ async function updateUserBalance(userId, amount, description, transactionType = 
     }
     const balanceBefore = parseFloat(userRows[0].balance || 0);
     const balanceAfter = balanceBefore + amount;
-    await conn.query(
+    const [ins] = await conn.query(
       'UPDATE users SET balance = ?, updated_at = NOW() WHERE id = ?',
       [balanceAfter, userId]
     );
@@ -880,6 +880,7 @@ async function updateUserBalance(userId, amount, description, transactionType = 
       [userId, amount, description, transactionType, paymentMethod, referenceId,
        balanceBefore, balanceAfter]
     );
+    const billingId = ins && ins.insertId ? Number(ins.insertId) : null;
     await conn.commit();
     if (DEBUG) {
       console.log('[updateUserBalance]', {
@@ -887,11 +888,11 @@ async function updateUserBalance(userId, amount, description, transactionType = 
         description: description.substring(0, 50)
       });
     }
-    return { success: true, balanceAfter, balanceBefore };
+    return { success: true, ok: true, balanceAfter, balanceBefore, billingId };
   } catch (err) {
     await conn.rollback();
     console.error('[updateUserBalance] Error:', err);
-    return { success: false, error: err.message };
+    return { success: false, ok: false, error: err.message };
   } finally {
     conn.release();
   }
@@ -16182,8 +16183,26 @@ app.post('/webhooks/daily/events', async (req, res) => {
               if (logRow && logRow.user_id) {
                 // Calculate cost based on billsec and inbound rate
                 const billsecVal = Number(logRow.billsec) || 0;
-                const ratePerMin = AI_INBOUND_LOCAL_RATE_PER_MIN || 0;
-                const cost = billsecVal > 0 ? (billsecVal / 60) * ratePerMin : 0;
+                const rate = rateAiInboundCallPrice({ toNumber: logRow.to_number, billsec: billsecVal });
+                const cost = Number(rate.price || 0);
+
+                // Charge once per ai_call_logs row (idempotent via billed/billing_history_id).
+                const typeLabel = rate.isTollfree ? 'toll-free' : 'local';
+                const chargeDesc = `AI inbound ${typeLabel} call – ${String(logRow.to_number || '').trim() || String(logRow.call_id || '')}`.slice(0, 255);
+                const chargeRes = await chargeAiInboundCallLog({
+                  aiCallLogId: logRow.id,
+                  userId: logRow.user_id,
+                  amount: cost,
+                  description: chargeDesc
+                });
+                if (DEBUG && chargeRes && chargeRes.ok && !chargeRes.alreadyBilled && !chargeRes.skipped) {
+                  console.log('[daily.webhook] Charged inbound AI call:', {
+                    userId: logRow.user_id,
+                    callId: logRow.call_id,
+                    amount: cost,
+                    billingId: chargeRes.billingId || null
+                  });
+                }
 
                 const cdrWrite = await storeCdr({
                   userId: logRow.user_id,
@@ -17121,6 +17140,141 @@ function rateAiInboundCallPrice({ toNumber, billsec }) {
   // Keep enough precision for per-second pricing while staying reasonable for UI
   const rounded = Number(price.toFixed(6));
   return { price: Number.isFinite(rounded) ? rounded : 0, isTollfree, ratePerMin, billedUnits };
+}
+async function chargeAiInboundCallLog({ aiCallLogId, userId, amount, description }) {
+  if (!pool || !aiCallLogId || !userId) return { ok: false, reason: 'missing_params' };
+
+  const callLogId = Number(aiCallLogId);
+  const uid = Number(userId);
+  const amt = Math.max(0, Number(amount) || 0);
+  if (!Number.isFinite(callLogId) || !Number.isFinite(uid)) return { ok: false, reason: 'invalid_params' };
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [rows] = await conn.query(
+      `SELECT id, call_id, to_number, price, billed, billing_history_id
+       FROM ai_call_logs
+       WHERE id = ? AND user_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [callLogId, uid]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row) {
+      await conn.rollback();
+      return { ok: false, reason: 'call_log_not_found' };
+    }
+
+    const alreadyBilled = Number(row.billed || 0) === 1 || !!row.billing_history_id;
+    if (alreadyBilled) {
+      await conn.commit();
+      return { ok: true, alreadyBilled: true, billingId: row.billing_history_id ? Number(row.billing_history_id) : null };
+    }
+
+    const amountToCharge = amt > 0 ? amt : Math.max(0, Number(row.price || 0));
+    if (!(amountToCharge > 0)) {
+      await conn.query(
+        'UPDATE ai_call_logs SET billed = 1, price = COALESCE(price, 0), updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+        [callLogId]
+      );
+      await conn.commit();
+      return { ok: true, skipped: true, reason: 'zero_amount' };
+    }
+
+    const [uRows] = await conn.query(
+      'SELECT balance FROM users WHERE id = ? AND is_active = 1 LIMIT 1 FOR UPDATE',
+      [uid]
+    );
+    const u = uRows && uRows[0] ? uRows[0] : null;
+    if (!u) throw new Error('User not found or inactive');
+
+    const balanceBefore = Number(u.balance || 0);
+    const balanceAfter = balanceBefore - amountToCharge;
+    const desc = String(description || `AI inbound call – ${row.to_number || row.call_id || callLogId}`)
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 255);
+
+    await conn.query(
+      'UPDATE users SET balance = ?, updated_at = NOW() WHERE id = ?',
+      [balanceAfter, uid]
+    );
+
+    const [ins] = await conn.query(
+      `INSERT INTO billing_history
+       (user_id, amount, description, transaction_type, payment_method, reference_id,
+        balance_before, balance_after, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', NOW())`,
+      [uid, -Math.abs(amountToCharge), desc, 'debit', 'ai_inbound', row.call_id || null, balanceBefore, balanceAfter]
+    );
+    const billingId = ins && ins.insertId ? Number(ins.insertId) : null;
+
+    await conn.query(
+      'UPDATE ai_call_logs SET billed = 1, billing_history_id = ?, price = COALESCE(price, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1',
+      [billingId, amountToCharge, callLogId]
+    );
+
+    await conn.commit();
+    return { ok: true, billingId, amount: amountToCharge, balanceBefore, balanceAfter };
+  } catch (e) {
+    try { await conn.rollback(); } catch {}
+    if (DEBUG) console.warn('[ai.call.bill] chargeAiInboundCallLog failed:', e?.message || e);
+    return { ok: false, reason: e?.message || 'charge_failed' };
+  } finally {
+    conn.release();
+  }
+}
+
+async function billUnchargedAiInboundCallsForUser({ localUserId, limit = 200 }) {
+  if (!pool || !localUserId) return { processed: 0, charged: 0, skipped: 0, failed: 0 };
+  try {
+    const safeLimit = Math.max(1, Math.min(1000, parseInt(String(limit || '200'), 10) || 200));
+    const [rows] = await pool.query(
+      `SELECT id, call_id, to_number, billsec, duration, price
+       FROM ai_call_logs
+       WHERE user_id = ?
+         AND direction = 'inbound'
+         AND time_end IS NOT NULL
+         AND time_connect IS NOT NULL
+         AND COALESCE(billsec, duration, 0) > 0
+         AND billed = 0
+       ORDER BY time_end ASC, id ASC
+       LIMIT ${safeLimit}`,
+      [localUserId]
+    );
+
+    let processed = 0;
+    let charged = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const r of rows || []) {
+      processed += 1;
+      const billsec = (r.billsec != null ? Number(r.billsec) : (r.duration != null ? Number(r.duration) : 0)) || 0;
+      const rate = rateAiInboundCallPrice({ toNumber: r.to_number, billsec });
+      const amount = (Number(r.price || 0) > 0) ? Number(r.price || 0) : Number(rate.price || 0);
+      const typeLabel = rate.isTollfree ? 'toll-free' : 'local';
+      const desc = `AI inbound ${typeLabel} call – ${String(r.to_number || '').trim() || String(r.call_id || '')}`.slice(0, 255);
+
+      const charge = await chargeAiInboundCallLog({
+        aiCallLogId: r.id,
+        userId: localUserId,
+        amount,
+        description: desc
+      });
+
+      if (charge && charge.ok && !charge.alreadyBilled && !charge.skipped) charged += 1;
+      else if (charge && (charge.alreadyBilled || charge.skipped)) skipped += 1;
+      else failed += 1;
+    }
+
+    return { processed, charged, skipped, failed };
+  } catch (e) {
+    if (DEBUG) console.warn('[ai.call.bill] billUnchargedAiInboundCallsForUser failed:', e?.message || e);
+    return { processed: 0, charged: 0, skipped: 0, failed: 0 };
+  }
 }
 
 // Backfill/compute per-call price for AI call logs. This is separate from charging the user.
@@ -18185,6 +18339,13 @@ async function runMarkupBillingTick() {
         } catch (e) {
           if (DEBUG) console.warn('[billing.ai.monthly] Failed:', e?.message || e);
         }
+      }
+
+      // Bill any completed inbound AI calls that are still unbilled (idempotent).
+      try {
+        await billUnchargedAiInboundCallsForUser({ localUserId, limit: 200 });
+      } catch (e) {
+        if (DEBUG) console.warn('[billing.ai.inbound] Failed:', e?.message || e);
       }
 
       // If enabled, keep AI number routing synced with balance (disable when credit < threshold, re-enable when sufficient)
