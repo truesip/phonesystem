@@ -755,7 +755,7 @@
     <div class="header-right">
       <div id="noticeable-widget"></div>
       <span id="currentBalance" class="header-balance"></span>
-      <button id="addFundBtn" class="btn--primary" <%= hasAddFundsMethods ? '' : 'disabled title="No payment methods are configured"' %>>➕ Add Funds</button>
+      <button id="addFundBtn" class="btn--primary">➕ Add Funds</button>
       <form style="display:inline" method="post" action="/logout"><button type="submit">Logout</button></form>
     </div>
   </header>
@@ -7851,10 +7851,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     }
 
     $('#addFundBtn').addEventListener('click', () => {
-      if (!HAS_ADD_FUNDS_METHODS) {
-        alert('No payment methods are configured right now. Please contact support.');
-        return;
-      }
       $('#addFundModal').style.display = 'flex';
       $('#fundAmount').value = '';
       $('#fundAmount').focus();
