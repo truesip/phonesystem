@@ -3539,9 +3539,10 @@ if (DEBUG) {
   });
 }
 
-// Serve the home page at root
+// Redirect root to login (or dashboard if already authenticated)
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'home.html'));
+  if (req.session && req.session.userId) return res.redirect('/dashboard');
+  res.redirect('/login');
 });
 
 // Serve the signup page at /signup
