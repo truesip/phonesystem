@@ -1276,11 +1276,26 @@
               <% }); %>
             </div>
           <% } else { %>
+            <label style="margin-left:8px;cursor:pointer">
+              <input type="radio" name="fundMethod" value="card" checked> Card
+            </label>
+            <label style="margin-left:8px;cursor:pointer">
+              <input type="radio" name="fundMethod" value="crypto"> Crypto
+            </label>
+            <label style="margin-left:8px;cursor:pointer">
+              <input type="radio" name="fundMethod" value="ach"> ACH
+            </label>
+            <div style="margin-top:6px;font-size:12px;color:#6b7280">
+              <div><strong>Card</strong>: instant credit after successful payment.</div>
+              <div><strong>Crypto</strong>: credit is applied after network confirmations (may take several minutes).</div>
+              <div><strong>ACH</strong>: credit is applied after invoice payment is confirmed (may take a few minutes).</div>
+            </div>
             <div style="margin-top:6px;font-size:12px;color:#dc2626">
-              No payment methods are configured. Please contact support.
+              Payment configuration could not be detected automatically, so fallback methods are shown.
             </div>
           <% } %>
         </div>
+        <div id="fundStatus" style="display:none;margin-bottom:10px;font-size:12px;color:#dc2626"></div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="cancelFundBtn" class="btn--muted">Cancel</button>
           <button id="confirmFundBtn" class="btn--primary">Continue</button>
@@ -7842,7 +7857,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       if (Array.isArray(ADD_FUNDS_METHODS) && ADD_FUNDS_METHODS.length && ADD_FUNDS_METHODS[0] && ADD_FUNDS_METHODS[0].value) {
         return String(ADD_FUNDS_METHODS[0].value || '');
       }
-      return '';
+      return 'card';
     }
 
     function getFundMethodLabel(method){
@@ -7853,11 +7868,10 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     $('#addFundBtn').addEventListener('click', () => {
       $('#addFundModal').style.display = 'flex';
       $('#fundAmount').value = '';
+      const fs = document.getElementById('fundStatus');
+      if (fs) { fs.style.display = 'none'; fs.textContent = ''; }
       $('#fundAmount').focus();
     });
-    if (!HAS_ADD_FUNDS_METHODS) {
-      $('#confirmFundBtn').disabled = true;
-    }
     
     $('#cancelFundBtn').addEventListener('click', () => {
       $('#addFundModal').style.display = 'none';
@@ -7871,6 +7885,8 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     });
     
     $('#confirmFundBtn').addEventListener('click', async () => {
+      const fundStatusEl = document.getElementById('fundStatus');
+      if (fundStatusEl) { fundStatusEl.style.display = 'none'; fundStatusEl.textContent = ''; }
       const amount = parseFloat($('#fundAmount').value);
 
       if (!amount || !Number.isFinite(amount)) {
@@ -7912,7 +7928,9 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         const j = await r.json();
 
         if (!j || j.success === false) {
-          showToast(j?.message || `${methodLabel} payment could not be started. Please try again.`, 'error');
+          const errMsg = j?.message || `${methodLabel} payment could not be started. Please try again.`;
+          if (fundStatusEl) { fundStatusEl.textContent = errMsg; fundStatusEl.style.display = 'block'; }
+          showToast(errMsg, 'error');
           return;
         }
 
@@ -7934,7 +7952,9 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         loadProfile();
       } catch (e) {
         console.error('[addFunds]', e);
-        alert('Failed to start payment. Please try again.');
+        const errMsg = 'Failed to start payment. Please try again.';
+        if (fundStatusEl) { fundStatusEl.textContent = errMsg; fundStatusEl.style.display = 'block'; }
+        alert(errMsg);
       } finally {
         $('#confirmFundBtn').disabled = false;
         $('#confirmFundBtn').textContent = 'Continue';
