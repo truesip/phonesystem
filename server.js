@@ -12262,7 +12262,7 @@ app.get('/api/me/ai/numbers/available', requireAuth, async (req, res) => {
     if (city) {
       dailyParams.city = city;
     }
-    dailyParams.limit = Math.min(limit * 2, 100);
+    // Note: Daily API does not support a 'limit' parameter on /list-available-numbers
 
     if (DEBUG) console.log('[ai.numbers.available] Daily API params:', dailyParams);
 

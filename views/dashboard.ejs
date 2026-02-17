@@ -1924,6 +1924,10 @@
   <script>
     const CHECKOUT_MIN_AMOUNT = <%= typeof checkoutMinAmount !== 'undefined' ? checkoutMinAmount : 100 %>;
     const CHECKOUT_MAX_AMOUNT = <%= typeof checkoutMaxAmount !== 'undefined' ? checkoutMaxAmount : 500 %>;
+    const LOCAL_DID_MARKUP = <%= typeof localDidMarkup !== 'undefined' ? localDidMarkup : 10.20 %>;
+    const TOLLFREE_DID_MARKUP = <%= typeof tollfreeDidMarkup !== 'undefined' ? tollfreeDidMarkup : 25.20 %>;
+    const AI_LOCAL_DID_FEE = <%= typeof aiLocalDidFee !== 'undefined' ? aiLocalDidFee : 10.20 %>;
+    const AI_TOLLFREE_DID_FEE = <%= typeof aiTollfreeDidFee !== 'undefined' ? aiTollfreeDidFee : 25.20 %>;
     const $ = (s)=>document.querySelector(s);
     let meProfile = null;
     var billingPage = 0;
