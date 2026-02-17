@@ -9302,7 +9302,7 @@ async function runDialerWorkerTick() {
         if (!leadId) continue;
         const [claim] = await pool.execute(
           `UPDATE dialer_leads
-           SET status = 'queued', attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP
+           SET status = 'queued', attempt_count = attempt_count + 1
            WHERE id = ? AND user_id = ? AND status = 'pending'`,
           [leadId, userId]
         );
@@ -16578,7 +16578,7 @@ async function cartesiaApiCall({ method, path, body, params }) {
 // to our /webhooks/daily/events endpoint so AI call durations/status are tracked.
 const DAILY_EVENTS_WEBHOOK_EVENT_TYPES = [
   'dialin.connected', 'dialin.stopped', 'dialin.warning', 'dialin.error',
-  'dialout.started', 'dialout.connected', 'dialout.answered', 'dialout.stopped', 'dialout.error', 'dialout.warning'
+  'dialout.connected', 'dialout.answered', 'dialout.stopped', 'dialout.error', 'dialout.warning'
 ];
 
 async function ensureDailyEventsWebhook() {
