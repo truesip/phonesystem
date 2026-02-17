@@ -755,7 +755,7 @@
     <div class="header-right">
       <div id="noticeable-widget"></div>
       <span id="currentBalance" class="header-balance"></span>
-      <button id="addFundBtn" class="btn--primary">➕ Add Funds</button>
+      <button id="addFundBtn" class="btn--primary" <%= hasAddFundsMethods ? '' : 'disabled title="No payment methods are configured"' %>>➕ Add Funds</button>
       <form style="display:inline" method="post" action="/logout"><button type="submit">Logout</button></form>
     </div>
   </header>
@@ -1263,20 +1263,23 @@
         </div>
         <div style="margin-bottom:12px;font-size:13px;color:#4b5563">
           Payment method:
-          <label style="margin-left:8px;cursor:pointer">
-            <input type="radio" name="fundMethod" value="card" checked> Card
-          </label>
-          <label style="margin-left:8px;cursor:pointer">
-            <input type="radio" name="fundMethod" value="crypto"> Crypto
-          </label>
-          <label style="margin-left:8px;cursor:pointer">
-            <input type="radio" name="fundMethod" value="ach"> ACH
-          </label>
-          <div style="margin-top:6px;font-size:12px;color:#6b7280">
-            <div><strong>Card</strong>: instant credit after successful payment.</div>
-            <div><strong>Crypto</strong>: credit is applied after network confirmations (may take several minutes).</div>
-            <div><strong>ACH</strong>: credit is applied after invoice payment is confirmed (may take a few minutes).</div>
-          </div>
+          <% const _addFundsMethods = Array.isArray(addFundsMethods) ? addFundsMethods : []; %>
+          <% if (_addFundsMethods.length > 0) { %>
+            <% _addFundsMethods.forEach((m, idx) => { %>
+              <label style="margin-left:8px;cursor:pointer">
+                <input type="radio" name="fundMethod" value="<%= m.value %>" <%= String(defaultFundMethod || '') === String(m.value || '') || (!defaultFundMethod && idx === 0) ? 'checked' : '' %>> <%= m.label %>
+              </label>
+            <% }); %>
+            <div style="margin-top:6px;font-size:12px;color:#6b7280">
+              <% _addFundsMethods.forEach((m) => { %>
+                <div><strong><%= m.label %></strong>: <%= m.helpText %></div>
+              <% }); %>
+            </div>
+          <% } else { %>
+            <div style="margin-top:6px;font-size:12px;color:#dc2626">
+              No payment methods are configured. Please contact support.
+            </div>
+          <% } %>
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button id="cancelFundBtn" class="btn--muted">Cancel</button>
@@ -1924,6 +1927,13 @@
   <script>
     const CHECKOUT_MIN_AMOUNT = <%= typeof checkoutMinAmount !== 'undefined' ? checkoutMinAmount : 100 %>;
     const CHECKOUT_MAX_AMOUNT = <%= typeof checkoutMaxAmount !== 'undefined' ? checkoutMaxAmount : 500 %>;
+    const ADD_FUNDS_METHODS = <%- JSON.stringify(Array.isArray(addFundsMethods) ? addFundsMethods : []) %>;
+    const DEFAULT_FUND_METHOD = <%- JSON.stringify(typeof defaultFundMethod !== 'undefined' ? defaultFundMethod : null) %>;
+    const HAS_ADD_FUNDS_METHODS = <%= hasAddFundsMethods ? 'true' : 'false' %>;
+    const ADD_FUNDS_METHOD_LABELS = (ADD_FUNDS_METHODS || []).reduce((acc, m) => {
+      if (m && m.value) acc[String(m.value)] = String(m.label || m.value);
+      return acc;
+    }, {});
     const LOCAL_DID_MARKUP = <%= typeof localDidMarkup !== 'undefined' ? localDidMarkup : 10.20 %>;
     const TOLLFREE_DID_MARKUP = <%= typeof tollfreeDidMarkup !== 'undefined' ? tollfreeDidMarkup : 25.20 %>;
     const AI_LOCAL_DID_FEE = <%= typeof aiLocalDidFee !== 'undefined' ? aiLocalDidFee : 10.20 %>;
@@ -7827,14 +7837,31 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     // Add Fund Modal
     function getSelectedFundMethod(){
       const methodInput = document.querySelector('input[name="fundMethod"]:checked');
-      return methodInput ? String(methodInput.value || '') : 'card';
+      if (methodInput && methodInput.value) return String(methodInput.value || '');
+      if (DEFAULT_FUND_METHOD) return String(DEFAULT_FUND_METHOD || '');
+      if (Array.isArray(ADD_FUNDS_METHODS) && ADD_FUNDS_METHODS.length && ADD_FUNDS_METHODS[0] && ADD_FUNDS_METHODS[0].value) {
+        return String(ADD_FUNDS_METHODS[0].value || '');
+      }
+      return '';
+    }
+
+    function getFundMethodLabel(method){
+      const key = String(method || '').trim();
+      return ADD_FUNDS_METHOD_LABELS[key] || key || 'Payment';
     }
 
     $('#addFundBtn').addEventListener('click', () => {
+      if (!HAS_ADD_FUNDS_METHODS) {
+        alert('No payment methods are configured right now. Please contact support.');
+        return;
+      }
       $('#addFundModal').style.display = 'flex';
       $('#fundAmount').value = '';
       $('#fundAmount').focus();
     });
+    if (!HAS_ADD_FUNDS_METHODS) {
+      $('#confirmFundBtn').disabled = true;
+    }
     
     $('#cancelFundBtn').addEventListener('click', () => {
       $('#addFundModal').style.display = 'none';
@@ -7858,20 +7885,26 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       }
 
       const method = getSelectedFundMethod();
+      if (!method) {
+        return alert('No payment method is available right now.');
+      }
+      const methodLabel = getFundMethodLabel(method);
+
+      const endpoint = method === 'crypto'
+        ? '/api/me/nowpayments/checkout'
+        : method === 'ach'
+          ? '/api/me/ach/checkout'
+          : method === 'card'
+            ? '/api/me/card/checkout'
+            : '';
+      if (!endpoint) {
+        return alert('Selected payment method is not supported.');
+      }
 
       $('#confirmFundBtn').disabled = true;
-      $('#confirmFundBtn').textContent = method === 'crypto'
-        ? 'Redirecting to Crypto...'
-        : method === 'ach'
-          ? 'Redirecting to ACH...'
-          : 'Redirecting to Card...';
+      $('#confirmFundBtn').textContent = `Redirecting to ${methodLabel}...`;
 
       try {
-        const endpoint = method === 'crypto'
-          ? '/api/me/nowpayments/checkout'
-          : method === 'ach'
-            ? '/api/me/ach/checkout'
-            : '/api/me/card/checkout';
 
         const payload = { amount };
 
@@ -7883,24 +7916,14 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         const j = await r.json();
 
         if (!j || j.success === false) {
-          const label = method === 'crypto'
-            ? 'Crypto payment'
-            : method === 'ach'
-              ? 'ACH payment'
-              : 'Card payment';
-          showToast(j?.message || `${label} could not be started. Please try again.`, 'error');
+          showToast(j?.message || `${methodLabel} payment could not be started. Please try again.`, 'error');
           return;
         }
 
         // Hosted checkout flow (Card / Crypto / ACH)
         if (j.payment_url) {
           $('#addFundModal').style.display = 'none';
-          const label = method === 'crypto'
-            ? 'Crypto payment'
-            : method === 'ach'
-              ? 'ACH payment'
-              : 'Card payment';
-          showLinkToast(`${label} checkout page is ready. If you are not redirected automatically, click the link below.`, 'Open payment page', j.payment_url, 'success');
+          showLinkToast(`${methodLabel} checkout page is ready. If you are not redirected automatically, click the link below.`, 'Open payment page', j.payment_url, 'success');
           window.location.href = j.payment_url;
           return;
         }

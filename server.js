@@ -3805,6 +3805,43 @@ app.get('/dashboard', requireAuth, (req, res) => {
 
   const checkoutMin = Number.isFinite(CHECKOUT_MIN_AMOUNT) ? CHECKOUT_MIN_AMOUNT : 100;
   const checkoutMax = Number.isFinite(CHECKOUT_MAX_AMOUNT) ? CHECKOUT_MAX_AMOUNT : 500;
+
+  // Add Funds methods are derived from configured payment integrations (.env).
+  const cardProvider = String(CARD_PAYMENT_PROVIDER || 'square').trim().toLowerCase();
+  const cardConfigured = cardProvider === 'stripe'
+    ? !!String(STRIPE_SECRET_KEY || '').trim()
+    : cardProvider === 'square'
+      ? (!!String(SQUARE_ACCESS_TOKEN || '').trim() && !!String(SQUARE_APPLICATION_ID || '').trim())
+      : false;
+
+  const addFundsMethods = [];
+  if (cardConfigured) {
+    const cardLabel = cardProvider === 'stripe'
+      ? 'Card (Stripe)'
+      : cardProvider === 'square'
+        ? 'Card (Square)'
+        : 'Card';
+    addFundsMethods.push({
+      value: 'card',
+      label: cardLabel,
+      helpText: 'instant credit after successful payment.'
+    });
+  }
+  if (String(NOWPAYMENTS_API_KEY || '').trim()) {
+    addFundsMethods.push({
+      value: 'crypto',
+      label: 'Crypto',
+      helpText: 'credit is applied after network confirmations (may take several minutes).'
+    });
+  }
+  if (isBillcomConfigured()) {
+    addFundsMethods.push({
+      value: 'ach',
+      label: 'ACH',
+      helpText: 'credit is applied after invoice payment is confirmed (may take a few minutes).'
+    });
+  }
+  const defaultFundMethod = addFundsMethods.length ? String(addFundsMethods[0].value) : null;
   res.render('dashboard', {
     username: req.session.username || '',
     localDidMarkup: localMarkup,
@@ -3813,6 +3850,9 @@ app.get('/dashboard', requireAuth, (req, res) => {
     aiTollfreeDidFee: aiTollfreeFee,
     checkoutMinAmount: checkoutMin,
     checkoutMaxAmount: checkoutMax,
+    addFundsMethods,
+    hasAddFundsMethods: addFundsMethods.length > 0,
+    defaultFundMethod,
   });
 });
 
