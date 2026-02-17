@@ -7733,20 +7733,24 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     let billingData = [];
     
     async function loadBillingHistory() {
+      const emptyEl = $('#billing-empty');
+      const tableEl = $('#billing-table');
+      const pagerEl = $('#billing-pager');
       try {
         const r = await fetch(`/api/me/billing-history?page=${billingPage}&pageSize=${billingPageSize}`);
         if (!r.ok) {
-          // Session expired – redirect to login
           if (r.status === 401) { window.location.href = '/login'; return; }
           throw new Error('HTTP ' + r.status);
         }
         const j = await r.json();
+        if (!j || j.success === false) throw new Error(j?.message || 'Server error');
         billingData = j.data || [];
         const balance = j.balance;
         
         // Update balance display in header if element exists
-        if (balance !== undefined && balance !== null && $('#currentBalance')) {
-$('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15\">$${Number(balance).toFixed(2)}</strong>`;
+        const balEl = $('#currentBalance');
+        if (balance !== undefined && balance !== null && balEl) {
+          balEl.innerHTML = `Current Balance: <strong style="color:#facc15">$${Number(balance).toFixed(2)}</strong>`;
         }
 
         // Keep in-memory profile balance in sync so AI-number assignment locking stays accurate.
@@ -7758,14 +7762,13 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           try { applyAiNumbersBalanceLock(); } catch {}
         }
         
-        const tbody = $('#billing-table tbody');
-        tbody.innerHTML = '';
+        const tbody = tableEl ? tableEl.querySelector('tbody') : null;
+        if (tbody) tbody.innerHTML = '';
         
         if (billingData.length === 0) {
-          $('#billing-empty').textContent = 'No billing history yet.';
-          $('#billing-empty').style.display = 'block';
-          $('#billing-table').style.display = 'none';
-          $('#billing-pager').style.display = 'none';
+          if (emptyEl) { emptyEl.textContent = 'No billing history yet.'; emptyEl.style.display = 'block'; }
+          if (tableEl) tableEl.style.display = 'none';
+          if (pagerEl) pagerEl.style.display = 'none';
           return;
         }
         
@@ -7776,7 +7779,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           const isNegative = amountNum < 0;
           const amountColor = isNegative ? '#ef4444' : '#059669';
           const amountPrefix = isNegative ? '-$' : '+$';
-          // Show more precision for very small charges (e.g. inbound per-second usage)
           let decimals = 2;
           const absAmt = Math.abs(amountNum);
           if (absAmt > 0 && absAmt < 0.01) decimals = 4;
@@ -7788,7 +7790,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           else if (rawStatus === 'pending') { statusLabel = 'Pending confirmation'; statusClass = 'bill-status-pending'; }
           else if (rawStatus === 'failed') { statusLabel = 'Failed'; statusClass = 'bill-status-failed'; }
           else { statusLabel = rawStatus.charAt(0).toUpperCase() + rawStatus.slice(1); statusClass = 'bill-status-pending'; }
-          const statusBadge = `<span class=\"bill-status ${statusClass}\">${escapeHtml(statusLabel)}<\/span>`;
+          const statusBadge = `<span class="bill-status ${statusClass}">${escapeHtml(statusLabel)}</span>`;
           let desc = row.description || 'Account refill';
           let methodBadge = '';
           const lowerDesc = desc.toLowerCase();
@@ -7800,20 +7802,21 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
             methodBadge = '<span class="bill-tag bill-tag-billcom">ACH</span>';
           }
           tr.innerHTML = `<td>${escapeHtml(date)}</td>`+
-                        `<td style=\"color:${amountColor};font-weight:600\">${amountPrefix}${escapeHtml(amountDisplay)}</td>`+
+                        `<td style="color:${amountColor};font-weight:600">${amountPrefix}${escapeHtml(amountDisplay)}</td>`+
                         `<td>${methodBadge}${escapeHtml(desc)}</td>`+
                         `<td>${statusBadge}</td>`;
-          tbody.appendChild(tr);
+          if (tbody) tbody.appendChild(tr);
         });
         
-        $('#billing-empty').style.display = 'none';
-        $('#billing-table').style.display = 'table';
-        $('#billing-pager').style.display = 'flex';
+        if (emptyEl) emptyEl.style.display = 'none';
+        if (tableEl) tableEl.style.display = 'table';
+        if (pagerEl) pagerEl.style.display = 'flex';
         const totalPages = Math.ceil((j.total || billingData.length) / billingPageSize) || 1;
-        $('#billingPageInfo').textContent = `Page ${billingPage + 1} of ${totalPages}`;
+        const pageInfoEl = $('#billingPageInfo');
+        if (pageInfoEl) pageInfoEl.textContent = `Page ${billingPage + 1} of ${totalPages}`;
       } catch (e) {
         console.error('[loadBillingHistory]', e);
-        $('#billing-empty').textContent = 'Failed to load billing history';
+        if (emptyEl) emptyEl.textContent = 'Failed to load billing history: ' + (e?.message || 'Unknown error');
       }
     }
     
