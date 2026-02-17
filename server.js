@@ -1988,6 +1988,7 @@ async function initDb() {
   )`);
 
   // Ensure dialer_campaigns columns exist (added after initial DDL)
+  // Uses direct ALTER TABLE with duplicate-column error suppression for reliability.
   for (const col of [
     { name: 'ai_agent_name', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN ai_agent_name VARCHAR(191) NULL" },
     { name: 'concurrency_limit', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN concurrency_limit INT NOT NULL DEFAULT 1" },
@@ -2000,16 +2001,12 @@ async function initDb() {
     { name: 'updated_at', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" }
   ]) {
     try {
-      const [rows] = await pool.query(
-        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='dialer_campaigns' AND column_name=? LIMIT 1",
-        [dbName, col.name]
-      );
-      if (!rows || !rows.length) {
-        await pool.query(col.ddl);
-        if (DEBUG) console.log(`[schema] Added dialer_campaigns.${col.name} column`);
-      }
+      await pool.query(col.ddl);
+      console.log(`[schema] Added dialer_campaigns.${col.name} column`);
     } catch (e) {
-      if (DEBUG) console.warn(`[schema] dialer_campaigns.${col.name} check failed`, e.message || e);
+      // ER_DUP_FIELDNAME (1060) = column already exists; safe to ignore.
+      if (e && e.errno === 1060) continue;
+      console.warn(`[schema] dialer_campaigns.${col.name} migration failed:`, e.message || e);
     }
   }
 
@@ -9267,7 +9264,7 @@ async function runDialerWorkerTick() {
               campaign_audio_blob, campaign_audio_size
        FROM dialer_campaigns
        WHERE status = 'running'
-       ORDER BY updated_at DESC, id DESC
+       ORDER BY id DESC
        LIMIT 200`
     );
 
