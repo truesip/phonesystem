@@ -16576,6 +16576,92 @@ async function cartesiaApiCall({ method, path, body, params }) {
   return resp.data;
 }
 
+// ── Daily events webhook auto-registration ──
+// Ensures a Daily domain webhook is configured to send dialin.*/dialout.* events
+// to our /webhooks/daily/events endpoint so AI call durations/status are tracked.
+const DAILY_EVENTS_WEBHOOK_EVENT_TYPES = [
+  'dialin.connected', 'dialin.stopped', 'dialin.warning', 'dialin.error',
+  'dialout.started', 'dialout.connected', 'dialout.answered', 'dialout.stopped', 'dialout.error', 'dialout.warning'
+];
+
+async function ensureDailyEventsWebhook() {
+  if (!DAILY_API_KEY) {
+    console.warn('[daily.webhook.setup] DAILY_API_KEY not configured; skipping webhook registration');
+    return;
+  }
+
+  const publicBase = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/$/, '');
+  if (!publicBase) {
+    console.warn('[daily.webhook.setup] PUBLIC_BASE_URL not configured; skipping webhook registration');
+    return;
+  }
+
+  // Build the desired webhook URL (include token if configured).
+  let desiredUrl = `${publicBase}/webhooks/daily/events`;
+  if (DAILY_DIALIN_WEBHOOK_TOKEN) {
+    try {
+      const u = new URL(desiredUrl);
+      u.searchParams.set('token', DAILY_DIALIN_WEBHOOK_TOKEN);
+      desiredUrl = u.toString();
+    } catch {}
+  }
+
+  try {
+    // List existing webhooks (Daily allows at most one per domain).
+    const listResp = await dailyApiCall({ method: 'GET', path: '/webhooks' });
+    const existing = Array.isArray(listResp?.data)
+      ? listResp.data
+      : (Array.isArray(listResp) ? listResp : []);
+
+    const webhook = existing[0] || null;
+
+    if (webhook && webhook.uuid) {
+      // Check if URL and event types match; also re-activate if FAILED.
+      const currentUrl = String(webhook.url || '').trim();
+      const currentEvents = Array.isArray(webhook.eventTypes) ? webhook.eventTypes : [];
+      const currentState = String(webhook.state || '').trim().toUpperCase();
+
+      const urlMatch = currentUrl === desiredUrl;
+      const eventsMatch = DAILY_EVENTS_WEBHOOK_EVENT_TYPES.every(e => currentEvents.includes(e));
+      const isFailed = currentState === 'FAILED';
+
+      if (urlMatch && eventsMatch && !isFailed) {
+        console.log('[daily.webhook.setup] Webhook already configured:', webhook.uuid);
+        return;
+      }
+
+      // Update existing webhook to fix URL, events, or re-activate.
+      console.log('[daily.webhook.setup] Updating existing webhook:', webhook.uuid, {
+        urlMatch, eventsMatch, isFailed
+      });
+      await dailyApiCall({
+        method: 'POST',
+        path: `/webhooks/${encodeURIComponent(webhook.uuid)}`,
+        body: {
+          url: desiredUrl,
+          eventTypes: DAILY_EVENTS_WEBHOOK_EVENT_TYPES
+        }
+      });
+      console.log('[daily.webhook.setup] Webhook updated successfully:', webhook.uuid);
+      return;
+    }
+
+    // No webhook exists — create one.
+    console.log('[daily.webhook.setup] Creating new Daily events webhook:', desiredUrl);
+    const created = await dailyApiCall({
+      method: 'POST',
+      path: '/webhooks',
+      body: {
+        url: desiredUrl,
+        eventTypes: DAILY_EVENTS_WEBHOOK_EVENT_TYPES
+      }
+    });
+    console.log('[daily.webhook.setup] Webhook created:', created?.uuid || '(unknown uuid)');
+  } catch (e) {
+    console.error('[daily.webhook.setup] Failed to ensure Daily events webhook:', e?.message || e);
+  }
+}
+
 // NOWPayments configuration
 const NOWPAYMENTS_API_KEY = process.env.NOWPAYMENTS_API_KEY || '';
 const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || '';
@@ -18115,6 +18201,8 @@ async function startServer() {
       if (DEBUG) console.log('Debug logging enabled');
       startBillingScheduler();
       startDialerWorker();
+      // Auto-register Daily events webhook (non-blocking; failures logged but don't prevent startup).
+      ensureDailyEventsWebhook().catch(e => console.warn('[startup] Daily webhook setup failed:', e?.message || e));
     });
   } catch (e) {
     console.error('Fatal startup error', e.message || e);
