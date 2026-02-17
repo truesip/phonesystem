@@ -7735,6 +7735,11 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     async function loadBillingHistory() {
       try {
         const r = await fetch(`/api/me/billing-history?page=${billingPage}&pageSize=${billingPageSize}`);
+        if (!r.ok) {
+          // Session expired – redirect to login
+          if (r.status === 401) { window.location.href = '/login'; return; }
+          throw new Error('HTTP ' + r.status);
+        }
         const j = await r.json();
         billingData = j.data || [];
         const balance = j.balance;

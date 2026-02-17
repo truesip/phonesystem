@@ -651,12 +651,19 @@ function buildNonce() {
 function requireAuth(req, res, next) {
   if (req.session && req.session.userId) return next();
   if (DEBUG) console.warn('[auth.fail]', { sid: req.sessionID, hasSession: !!req.session, userId: req.session?.userId });
+  // Return JSON 401 for API routes so fetch() callers get parseable error
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
+  }
   return res.redirect('/login');
 }
 async function requireAdmin(req, res, next) {
   // First ensure user is authenticated
   if (!req.session || !req.session.userId) {
     if (DEBUG) console.warn('[admin.auth.fail]', { sid: req.sessionID, hasSession: !!req.session, userId: req.session?.userId });
+    if (req.path.startsWith('/api/')) {
+      return res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
+    }
     return res.redirect('/login');
   }
   // Check if user is admin
