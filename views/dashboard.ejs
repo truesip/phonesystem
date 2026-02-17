@@ -232,26 +232,26 @@
     button.btn--success{
       background: rgba(16,185,129,.16);
       border-color: rgba(16,185,129,.40);
-      color: rgba(255,255,255,.92);
+      color: #059669;
       font-weight:800;
     }
 
     button.btn--warning{
       background: rgba(245,158,11,.18);
       border-color: rgba(245,158,11,.40);
-      color: rgba(255,255,255,.92);
+      color: #b45309;
       font-weight:800;
     }
 
     button.btn--danger{
       background: rgba(239,68,68,.18);
       border-color: rgba(239,68,68,.42);
-      color: rgba(255,255,255,.92);
+      color: #dc2626;
       font-weight:800;
     }
 
-    .icon-btn{background:transparent;color:rgba(255,255,255,.70);border-radius:999px;padding:2px 8px;font-size:11px;border:1px solid transparent;cursor:pointer}
-    .icon-btn:hover{background:rgba(255,255,255,.08);color:#fff;border-color:rgba(255,255,255,.12)}
+    .icon-btn{background:transparent;color:var(--muted);border-radius:999px;padding:2px 8px;font-size:11px;border:1px solid transparent;cursor:pointer}
+    .icon-btn:hover{background:rgba(0,0,0,.06);color:var(--text);border-color:rgba(0,0,0,.12)}
 
     .muted{color:var(--muted);font-size:12px}
 
@@ -289,22 +289,22 @@
       font-size:11px;
       font-weight:700;
       text-transform:capitalize;
-      border:1px solid rgba(255,255,255,.12);
-      background:rgba(255,255,255,.05);
-      color:rgba(255,255,255,.92);
+      border:1px solid rgba(0,0,0,.12);
+      background:rgba(0,0,0,.04);
+      color:var(--text);
     }
-    .dialer-status-running{border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.15);color:#bbf7d0}
-    .dialer-status-paused{border-color:rgba(245,158,11,.45);background:rgba(245,158,11,.15);color:#fde68a}
-    .dialer-status-draft{border-color:rgba(255,255,255,.20);color:rgba(255,255,255,.75)}
-    .dialer-status-completed{border-color:rgba(59,130,246,.35);background:rgba(59,130,246,.12);color:#cfe0ff}
+    .dialer-status-running{border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.12);color:#059669}
+    .dialer-status-paused{border-color:rgba(245,158,11,.45);background:rgba(245,158,11,.12);color:#b45309}
+    .dialer-status-draft{border-color:rgba(0,0,0,.15);color:var(--muted)}
+    .dialer-status-completed{border-color:rgba(59,130,246,.35);background:rgba(59,130,246,.10);color:#1d4ed8}
     .dialer-chip-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
     .dialer-chip{
-      background:rgba(255,255,255,.08);
-      border:1px solid rgba(255,255,255,.16);
+      background:rgba(0,0,0,.04);
+      border:1px solid rgba(0,0,0,.12);
       border-radius:10px;
       padding:3px 7px;
       font-size:11px;
-      color:rgba(255,255,255,.82);
+      color:var(--muted);
       display:inline-flex;
       gap:4px;
       align-items:center;
@@ -314,16 +314,16 @@
       cursor:pointer;
     }
     .dialer-chip[data-leads-status]:hover{
-      background:rgba(16,185,129,.18);
+      background:rgba(16,185,129,.12);
       border-color:rgba(16,185,129,.45);
-      color:#fff;
+      color:var(--text);
     }
     .dialer-chip-hint{
       font-size:10px;
-      color:rgba(255,255,255,.45);
+      color:var(--muted2);
       margin-top:4px;
     }
-    .dialer-chip strong{font-weight:900;color:#fff}
+    .dialer-chip strong{font-weight:900;color:var(--text)}
     .dialer-actions{display:flex;flex-wrap:wrap;gap:6px}
     .dialer-actions button{font-size:11px;padding:6px 10px;border-radius:10px}
     #dialerStatus{font-size:12px;margin-left:auto}
@@ -434,14 +434,14 @@
       font-weight:700;
     }
     .ai-tool-status-configured{
-      background:rgba(16,185,129,.15);
+      background:rgba(16,185,129,.12);
       border:1px solid rgba(16,185,129,.40);
-      color:#6ee7b7;
+      color:#059669;
     }
     .ai-tool-status-unconfigured{
-      background:rgba(255,255,255,.05);
-      border:1px solid rgba(255,255,255,.14);
-      color:rgba(255,255,255,.55);
+      background:rgba(0,0,0,.04);
+      border:1px solid rgba(0,0,0,.12);
+      color:var(--muted);
     }
 
     /* AI Tool Config Modal */
@@ -668,8 +668,8 @@
     /* Mobile optimizations */
     @media (max-width: 768px) {
       .wrap{flex-direction:column;min-height:0;}
-      aside{width:100%;display:flex;overflow-x:auto;border-right:none;border-bottom:1px solid rgba(255,255,255,.08);}
-      aside a{flex:0 0 auto;padding:9px 10.8px;font-size:11.7px;white-space:nowrap;border-bottom:none;border-right:1px solid rgba(255,255,255,.08);}
+      aside{width:100%;display:flex;overflow-x:auto;border-right:none;border-bottom:1px solid rgba(0,0,0,.10);}
+      aside a{flex:0 0 auto;padding:9px 10.8px;font-size:11.7px;white-space:nowrap;border-bottom:none;border-right:1px solid rgba(0,0,0,.08);}
       .sidebar-user{display:none;}
       main{padding:12px;height:auto;}
       .toolbar{flex-wrap:wrap;align-items:flex-start;}
@@ -678,7 +678,7 @@
       .toolbar select{width:100%;max-width:none;}
       table{font-size:12px;}
       #profile-table th,#profile-table td{display:block;width:100%;box-sizing:border-box;}
-      #profile-table tr{border-bottom:1px solid rgba(255,255,255,.10);}
+      #profile-table tr{border-bottom:1px solid rgba(0,0,0,.10);}
     }
 
     @media (max-width: 480px) {
@@ -1364,7 +1364,7 @@
           </div>
           <div class="muted" id="aiBuyFeeNote" style="font-size:12px;margin-top:10px">Each number is billed at <strong>$<span id="aiBuyFeeValue">0.00</span>/mo</strong>.</div>
 
-          <div style="border-top:1px solid rgba(255,255,255,.10);padding-top:14px;margin-top:14px">
+          <div style="border-top:1px solid rgba(0,0,0,.10);padding-top:14px;margin-top:14px">
             <div id="aiBuySearchStatus" class="muted" style="margin-bottom:10px">Select a state and click Search.</div>
             <table id="ai-buy-results-table" style="display:none">
               <thead><tr><th>Number</th><th>Location</th><th>Action</th></tr></thead>
@@ -1378,7 +1378,7 @@
 
     <!-- AI Agent Modal -->
     <div id="dialerCreateModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
-      <div style="background:#1a1a1a;border:1px solid rgba(255,255,255,.10);box-shadow:var(--shadow-sm);padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:var(--text)">
+      <div style="background:#ffffff;border:1px solid rgba(0,0,0,.10);box-shadow:var(--shadow-sm);padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:var(--text)">
         <h3 style="margin:0 0 10px 0">📞 Create Dialer Campaign</h3>
         <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
           <label style="display:flex;flex-direction:column;gap:4px">
@@ -1398,9 +1398,9 @@
           <label style="display:flex;flex-direction:column;gap:4px">
             <span>Concurrent Calls</span>
             <input id="dialerConcurrencyInput" type="range" min="1" max="20" value="1">
-            <div class="muted" style="font-size:12px;color:rgba(255,255,255,.60)">Simultaneous calls: <strong id="dialerConcurrencyValue">1</strong></div>
+            <div class="muted" style="font-size:12px;color:#64748b">Simultaneous calls: <strong id="dialerConcurrencyValue">1</strong></div>
           </label>
-          <div class="muted" style="font-size:12px;color:rgba(255,255,255,.60)">
+          <div class="muted" style="font-size:12px;color:#64748b">
             After creating the campaign you can upload leads (CSV with columns like <code>phone</code>, <code>name</code>, <code>metadata</code>) and start dialing.
           </div>
           <div id="dialerCreateError" class="muted" style="display:none;color:#b91c1c;font-size:12px"></div>
@@ -1413,18 +1413,18 @@
     </div>
 
     <div id="dialerUploadModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
-      <div style="background:#1a1a1a;border:1px solid rgba(255,255,255,.10);box-shadow:var(--shadow-sm);padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:var(--text)">
+      <div style="background:#ffffff;border:1px solid rgba(0,0,0,.10);box-shadow:var(--shadow-sm);padding:16px;border-radius:14px;width:420px;max-width:92%;max-height:92vh;overflow:auto;color:var(--text)">
         <h3 style="margin:0 0 6px 0">📋 Upload Leads</h3>
-        <div class="muted" style="margin-bottom:10px;color:rgba(255,255,255,.60);font-size:12px">Campaign: <strong id="dialerUploadCampaignName">—</strong></div>
+        <div class="muted" style="margin-bottom:10px;color:#64748b;font-size:12px">Campaign: <strong id="dialerUploadCampaignName">—</strong></div>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:13px">
           <span>CSV File *</span>
           <input id="dialerUploadFile" type="file" accept=".csv,text/csv">
         </label>
-        <div class="muted" style="font-size:12px;color:rgba(255,255,255,.60);margin-top:8px">
+        <div class="muted" style="font-size:12px;color:#64748b;margin-top:8px">
           Include a header row. Only digits are required in <code>phone</code>; we auto-format to E.164.
           Optional columns: <code>name</code>, <code>metadata</code> (JSON or text). Limit 5,000 leads per upload.
         </div>
-        <div id="dialerUploadStatus" class="muted" style="margin-top:10px;font-size:12px;color:rgba(255,255,255,.60)"></div>
+        <div id="dialerUploadStatus" class="muted" style="margin-top:10px;font-size:12px;color:#64748b"></div>
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
           <button id="dialerUploadCloseBtn" class="btn--muted" type="button">Close</button>
           <button id="dialerUploadSubmitBtn" class="btn--primary" type="button">Upload Leads</button>
@@ -1434,14 +1434,14 @@
 
     <!-- Dialer Leads by Status Modal -->
     <div id="dialerLeadsModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center">
-      <div style="background:#1a1a1a;border:1px solid rgba(255,255,255,.10);box-shadow:0 8px 32px rgba(0,0,0,0.4);padding:16px;border-radius:14px;width:680px;max-width:94%;max-height:92vh;overflow:auto;color:var(--text)">
+      <div style="background:#ffffff;border:1px solid rgba(0,0,0,.10);box-shadow:0 8px 32px rgba(0,0,0,0.4);padding:16px;border-radius:14px;width:680px;max-width:94%;max-height:92vh;overflow:auto;color:var(--text)">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
           <h3 style="margin:0" id="dialerLeadsModalTitle">📞 Leads</h3>
           <span class="muted" style="font-size:12px" id="dialerLeadsModalSubtitle"></span>
           <div style="margin-left:auto"></div>
           <button id="dialerLeadsCloseBtn" class="btn--muted" type="button">Close</button>
         </div>
-        <div id="dialerLeadsStatus" class="muted" style="font-size:12px;margin-bottom:10px;color:rgba(255,255,255,.60)"></div>
+        <div id="dialerLeadsStatus" class="muted" style="font-size:12px;margin-bottom:10px;color:#64748b"></div>
         <div id="dialerLeadsTableWrap" style="max-height:400px;overflow:auto">
           <table id="dialerLeadsTable" class="table table-sm" style="width:100%;font-size:12px">
             <thead>
@@ -1457,7 +1457,7 @@
             <tbody></tbody>
           </table>
         </div>
-        <div id="dialerLeadsEmpty" class="muted" style="display:none;text-align:center;padding:20px 0;color:rgba(255,255,255,.60)">No leads found for this status.</div>
+        <div id="dialerLeadsEmpty" class="muted" style="display:none;text-align:center;padding:20px 0;color:#64748b">No leads found for this status.</div>
         <div id="dialerLeadsPager" style="display:none;margin-top:12px;justify-content:space-between;align-items:center">
           <button id="dialerLeadsPrev" class="btn--muted">← Prev</button>
           <span id="dialerLeadsPageInfo" class="muted" style="font-size:12px"></span>
@@ -1478,7 +1478,7 @@
         </div>
 
         <!-- Blank Template -->
-        <div class="ai-template-card" data-template="blank" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;margin-bottom:10px;cursor:pointer;transition:all .15s ease">
+        <div class="ai-template-card" data-template="blank" style="background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.12);border-radius:12px;padding:12px;margin-bottom:10px;cursor:pointer;transition:all .15s ease">
           <div style="display:flex;align-items:center;gap:10px">
             <div style="font-size:18px">➕</div>
             <div>
@@ -1488,40 +1488,40 @@
           </div>
         </div>
 
-        <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px 0;color:rgba(255,255,255,.5)">Quickstart</div>
+        <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px 0;color:#94a3b8">Quickstart</div>
 
         <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
-          <div class="ai-template-card" data-template="customer-support" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+          <div class="ai-template-card" data-template="customer-support" style="background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
             <div style="font-size:16px;margin-bottom:6px">💜</div>
             <div style="font-weight:700;font-size:12px;margin-bottom:4px">Customer Support Specialist</div>
             <div class="muted" style="font-size:10px;line-height:1.4">A comprehensive template for resolving product issues, answering questions, and ensuring satisfying customer experiences with technical knowledge and empathy.</div>
           </div>
 
-          <div class="ai-template-card" data-template="lead-qualification" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+          <div class="ai-template-card" data-template="lead-qualification" style="background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
             <div style="font-size:16px;margin-bottom:6px">👤</div>
             <div style="font-weight:700;font-size:12px;margin-bottom:4px">Lead Qualification Specialist</div>
             <div class="muted" style="font-size:10px;line-height:1.4">A consultative template designed to identify qualified prospects, understand business challenges, and connect them with appropriate sales representatives.</div>
           </div>
 
-          <div class="ai-template-card" data-template="appointment-scheduler" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+          <div class="ai-template-card" data-template="appointment-scheduler" style="background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
             <div style="font-size:16px;margin-bottom:6px">📅</div>
             <div style="font-weight:700;font-size:12px;margin-bottom:4px">Appointment Scheduler</div>
             <div class="muted" style="font-size:10px;line-height:1.4">A specialized template for efficiently booking, confirming, rescheduling, or canceling appointments while providing clear service information.</div>
           </div>
 
-          <div class="ai-template-card" data-template="info-collector" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+          <div class="ai-template-card" data-template="info-collector" style="background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
             <div style="font-size:16px;margin-bottom:6px">📋</div>
             <div style="font-weight:700;font-size:12px;margin-bottom:4px">Info Collector</div>
             <div class="muted" style="font-size:10px;line-height:1.4">A methodical template for gathering accurate and complete information from customers while ensuring data quality and regulatory compliance.</div>
           </div>
 
-          <div class="ai-template-card" data-template="care-coordinator" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+          <div class="ai-template-card" data-template="care-coordinator" style="background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
             <div style="font-size:16px;margin-bottom:6px">💚</div>
             <div style="font-weight:700;font-size:12px;margin-bottom:4px">Care Coordinator</div>
             <div class="muted" style="font-size:10px;line-height:1.4">A compassionate template for scheduling medical appointments, answering health questions, and coordinating patient services with HIPAA compliance.</div>
           </div>
 
-          <div class="ai-template-card" data-template="feedback-gatherer" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
+          <div class="ai-template-card" data-template="feedback-gatherer" style="background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.12);border-radius:12px;padding:12px;cursor:pointer;transition:all .15s ease">
             <div style="font-size:16px;margin-bottom:6px">⭐</div>
             <div style="font-weight:700;font-size:12px;margin-bottom:4px">Feedback Gatherer</div>
             <div class="muted" style="font-size:10px;line-height:1.4">An engaging template for conducting surveys, collecting customer feedback, and gathering market research with high completion rates.</div>
@@ -1582,7 +1582,7 @@
           <input id="aiAgentTransferNumber" type="text" placeholder="Leave blank to use default (Tools → Call Transfer)" style="width:100%;box-sizing:border-box">
           <div class="muted" style="margin-top:4px">Overrides the default transfer destination for this agent only.</div>
         </div>
-        <div style="margin-bottom:10px;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04)">
+        <div style="margin-bottom:10px;padding:10px;border-radius:10px;border:1px solid rgba(0,0,0,.12);background:rgba(0,0,0,.03)">
           <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;font-size:13px;font-weight:700">
             <input id="aiAgentInboundTransferEnabled" type="checkbox"> <span>📲 Direct Transfer on Inbound Calls</span>
           </label>
@@ -1830,7 +1830,7 @@
           <div style="text-align:right">
             <button id="uploadDocTemplateBtn" class="btn--primary">Upload Template</button>
           </div>
-          <div style="border-top:1px solid rgba(255,255,255,.10);padding-top:14px;margin-top:6px">
+          <div style="border-top:1px solid rgba(0,0,0,.10);padding-top:14px;margin-top:6px">
             <label style="margin-bottom:8px;display:block">Uploaded Templates</label>
             <table id="ai-doc-templates-table" style="display:none">
               <thead><tr><th>Name</th><th>File</th><th>Updated</th><th>Actions</th></tr></thead>
@@ -1871,7 +1871,7 @@
               </select>
             </div>
           </div>
-          <div style="border-top:1px solid rgba(255,255,255,.10);padding-top:14px;margin-top:14px">
+          <div style="border-top:1px solid rgba(0,0,0,.10);padding-top:14px;margin-top:14px">
             <label style="margin-bottom:6px;display:block">Webhook URL <span class="muted">(for payment status updates)</span></label>
             <div style="display:flex;gap:8px;align-items:center">
               <input id="squareWebhookUrl" type="text" readonly style="flex:1;background:rgba(0,0,0,.2);cursor:text">
@@ -1904,7 +1904,7 @@
             </div>
           </div>
           <div class="muted" style="font-size:12px;margin-top:8px">Use a test key (sk_test_...) for testing, or a live key (sk_live_...) for production payments.</div>
-          <div style="border-top:1px solid rgba(255,255,255,.10);padding-top:14px;margin-top:14px">
+          <div style="border-top:1px solid rgba(0,0,0,.10);padding-top:14px;margin-top:14px">
             <label style="margin-bottom:6px;display:block">Webhook URL <span class="muted">(for payment status updates)</span></label>
             <div style="display:flex;gap:8px;align-items:center">
               <input id="stripeWebhookUrl" type="text" readonly style="flex:1;background:rgba(0,0,0,.2);cursor:text">
@@ -2060,7 +2060,7 @@
       const el = $('#dialerStatus');
       if (!el) return;
       el.textContent = msg || '';
-      el.style.color = isError ? '#f87171' : 'rgba(255,255,255,.70)';
+      el.style.color = isError ? '#dc2626' : '#64748b';
     }
 
     function dialerStatusBadge(status){
@@ -2683,7 +2683,7 @@
       const el = $('#phonesystem-status');
       if (!el) return;
       el.textContent = msg || '';
-      el.style.color = isError ? '#b91c1c' : 'rgba(255,255,255,.60)';
+      el.style.color = isError ? '#dc2626' : '#64748b';
     }
 
     async function psFetchJson(url, opts){
@@ -6319,8 +6319,8 @@ Guidelines:
         card.style.background = 'rgba(34,211,238,.08)';
       });
       card.addEventListener('mouseleave', () => {
-        card.style.borderColor = 'rgba(255,255,255,.12)';
-        card.style.background = 'rgba(255,255,255,.06)';
+        card.style.borderColor = 'rgba(0,0,0,.12)';
+        card.style.background = 'rgba(0,0,0,.03)';
       });
     });
 
@@ -6950,7 +6950,7 @@ Guidelines:
           plugins: {
             legend: {
               position: 'bottom',
-              labels: { color: 'rgba(255,255,255,.72)', font: { size: 10 }, boxWidth: 12 }
+              labels: { color: 'rgba(0,0,0,.60)', font: { size: 10 }, boxWidth: 12 }
             },
             tooltip: {
               callbacks: {
@@ -7032,19 +7032,19 @@ Guidelines:
                 scales: {
                   x: {
                     stacked: false,
-                    ticks: { color: 'rgba(255,255,255,.72)' },
-                    grid: { color: 'rgba(255,255,255,.10)' }
+                    ticks: { color: 'rgba(0,0,0,.55)' },
+                    grid: { color: 'rgba(0,0,0,.08)' }
                   },
                   y: {
                     beginAtZero: true,
-                    ticks: { precision: 0, color: 'rgba(255,255,255,.72)' },
-                    grid: { color: 'rgba(255,255,255,.10)' }
+                    ticks: { precision: 0, color: 'rgba(0,0,0,.55)' },
+                    grid: { color: 'rgba(0,0,0,.08)' }
                   }
                 },
                 plugins: {
                   legend: {
                     position: 'bottom',
-                    labels: { color: 'rgba(255,255,255,.72)' }
+                    labels: { color: 'rgba(0,0,0,.55)' }
                   }
                 }
               }
@@ -7080,7 +7080,7 @@ Guidelines:
                 plugins: {
                   legend: {
                     position: 'bottom',
-                    labels: { color: 'rgba(255,255,255,.72)', font: { size: 10 }, boxWidth: 12 }
+                    labels: { color: 'rgba(0,0,0,.60)', font: { size: 10 }, boxWidth: 12 }
                   }
                 }
               }
