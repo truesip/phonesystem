@@ -15451,6 +15451,41 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
       );
     }
 
+    // Bill completed outbound dialer call once (idempotent on dialer_call_logs.billed/billing_history_id).
+    try {
+      const [billRows] = await pool.execute(
+        `SELECT l.id, l.user_id, l.call_id, l.duration_sec, l.price,
+                d.phone_number AS to_number
+         FROM dialer_call_logs l
+         LEFT JOIN dialer_leads d ON d.id = l.lead_id
+         WHERE l.id = ? LIMIT 1`,
+        [logRow.id]
+      );
+      const billRow = billRows && billRows[0] ? billRows[0] : null;
+      if (billRow && Number(billRow.duration_sec || 0) > 0) {
+        const billsecVal = Math.max(0, Number(billRow.duration_sec || 0));
+        const rate = rateDialerOutboundCallPrice({ billsec: billsecVal });
+        const amount = (Number(billRow.price || 0) > 0) ? Number(billRow.price || 0) : Number(rate.price || 0);
+        const chargeDesc = `AI outbound call – ${String(billRow.to_number || '').trim() || String(billRow.call_id || '')}`.slice(0, 255);
+        const chargeRes = await chargeDialerOutboundCallLog({
+          dialerCallLogId: billRow.id,
+          userId: billRow.user_id,
+          amount,
+          description: chargeDesc
+        });
+        if (DEBUG && chargeRes && chargeRes.ok && !chargeRes.alreadyBilled && !chargeRes.skipped) {
+          console.log('[pipecat.dialout-completed] Charged outbound dialer call:', {
+            userId: billRow.user_id,
+            callId: billRow.call_id,
+            amount,
+            billingId: chargeRes.billingId || null
+          });
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[pipecat.dialout-completed] Failed to charge outbound call:', e?.message || e);
+    }
+
     if (DEBUG) {
       console.log('[pipecat.dialout-completed] Updated:', { logId: logRow.id, leadId: logRow.lead_id });
     }
@@ -15929,6 +15964,60 @@ app.post('/webhooks/daily/events', async (req, res) => {
             }
           } catch (e) {
             if (DEBUG) console.warn('[daily.webhook] Dialer call log update failed:', e?.message || e);
+          }
+
+          // Bill completed outbound dialer call once (idempotent on billed/billing_history_id).
+          if (type === 'dialout.stopped' && (logUpdated || logRow || leadRow)) {
+            try {
+              let billLogRow = null;
+              if (logRow && logRow.id) {
+                const [rows] = await pool.execute(
+                  `SELECT l.id, l.user_id, l.call_id, l.duration_sec, l.price,
+                          d.phone_number AS to_number
+                   FROM dialer_call_logs l
+                   LEFT JOIN dialer_leads d ON d.id = l.lead_id
+                   WHERE l.id = ? LIMIT 1`,
+                  [logRow.id]
+                );
+                billLogRow = rows && rows[0] ? rows[0] : null;
+              }
+              if (!billLogRow && leadRow && leadRow.id) {
+                const [rows] = await pool.execute(
+                  `SELECT l.id, l.user_id, l.call_id, l.duration_sec, l.price,
+                          d.phone_number AS to_number
+                   FROM dialer_call_logs l
+                   LEFT JOIN dialer_leads d ON d.id = l.lead_id
+                   WHERE l.lead_id = ?
+                   ORDER BY l.id DESC
+                   LIMIT 1`,
+                  [leadRow.id]
+                );
+                billLogRow = rows && rows[0] ? rows[0] : null;
+              }
+
+              if (billLogRow && Number(billLogRow.duration_sec || 0) > 0) {
+                const billsecVal = Math.max(0, Number(billLogRow.duration_sec || 0));
+                const rate = rateDialerOutboundCallPrice({ billsec: billsecVal });
+                const amount = (Number(billLogRow.price || 0) > 0) ? Number(billLogRow.price || 0) : Number(rate.price || 0);
+                const chargeDesc = `AI outbound call – ${String(billLogRow.to_number || '').trim() || String(billLogRow.call_id || '')}`.slice(0, 255);
+                const chargeRes = await chargeDialerOutboundCallLog({
+                  dialerCallLogId: billLogRow.id,
+                  userId: billLogRow.user_id,
+                  amount,
+                  description: chargeDesc
+                });
+                if (DEBUG && chargeRes && chargeRes.ok && !chargeRes.alreadyBilled && !chargeRes.skipped) {
+                  console.log('[daily.webhook] Charged outbound dialer call:', {
+                    userId: billLogRow.user_id,
+                    callId: billLogRow.call_id,
+                    amount,
+                    billingId: chargeRes.billingId || null
+                  });
+                }
+              }
+            } catch (e) {
+              if (DEBUG) console.warn('[daily.webhook] Failed to charge dialout.stopped call:', e?.message || e);
+            }
           }
 
           if ((leadUpdated || logUpdated) && (leadRow || logRow)) {
@@ -17337,6 +17426,144 @@ function rateDialerOutboundCallPrice({ billsec }) {
   return { price: Number.isFinite(rounded) ? rounded : 0, ratePerMin, billedUnits };
 }
 
+async function chargeDialerOutboundCallLog({ dialerCallLogId, userId, amount, description }) {
+  if (!pool || !dialerCallLogId || !userId) return { ok: false, reason: 'missing_params' };
+
+  const callLogId = Number(dialerCallLogId);
+  const uid = Number(userId);
+  const amt = Math.max(0, Number(amount) || 0);
+  if (!Number.isFinite(callLogId) || !Number.isFinite(uid)) return { ok: false, reason: 'invalid_params' };
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [rows] = await conn.query(
+      `SELECT l.id, l.call_id, l.price, l.billed, l.billing_history_id,
+              d.phone_number AS to_number
+       FROM dialer_call_logs l
+       LEFT JOIN dialer_leads d ON d.id = l.lead_id
+       WHERE l.id = ? AND l.user_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [callLogId, uid]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row) {
+      await conn.rollback();
+      return { ok: false, reason: 'call_log_not_found' };
+    }
+
+    const alreadyBilled = Number(row.billed || 0) === 1 || !!row.billing_history_id;
+    if (alreadyBilled) {
+      await conn.commit();
+      return { ok: true, alreadyBilled: true, billingId: row.billing_history_id ? Number(row.billing_history_id) : null };
+    }
+
+    const amountToCharge = amt > 0 ? amt : Math.max(0, Number(row.price || 0));
+    if (!(amountToCharge > 0)) {
+      await conn.query(
+        'UPDATE dialer_call_logs SET billed = 1, price = COALESCE(price, 0) WHERE id = ? LIMIT 1',
+        [callLogId]
+      );
+      await conn.commit();
+      return { ok: true, skipped: true, reason: 'zero_amount' };
+    }
+
+    const [uRows] = await conn.query(
+      'SELECT balance FROM users WHERE id = ? AND is_active = 1 LIMIT 1 FOR UPDATE',
+      [uid]
+    );
+    const u = uRows && uRows[0] ? uRows[0] : null;
+    if (!u) throw new Error('User not found or inactive');
+
+    const balanceBefore = Number(u.balance || 0);
+    const balanceAfter = balanceBefore - amountToCharge;
+    const desc = String(description || `AI outbound call – ${row.to_number || row.call_id || callLogId}`)
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 255);
+
+    await conn.query(
+      'UPDATE users SET balance = ?, updated_at = NOW() WHERE id = ?',
+      [balanceAfter, uid]
+    );
+
+    const [ins] = await conn.query(
+      `INSERT INTO billing_history
+       (user_id, amount, description, transaction_type, payment_method, reference_id,
+        balance_before, balance_after, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', NOW())`,
+      [uid, -Math.abs(amountToCharge), desc, 'debit', 'ai_outbound', row.call_id || null, balanceBefore, balanceAfter]
+    );
+    const billingId = ins && ins.insertId ? Number(ins.insertId) : null;
+
+    await conn.query(
+      'UPDATE dialer_call_logs SET billed = 1, billing_history_id = ?, price = COALESCE(price, ?) WHERE id = ? LIMIT 1',
+      [billingId, amountToCharge, callLogId]
+    );
+
+    await conn.commit();
+    return { ok: true, billingId, amount: amountToCharge, balanceBefore, balanceAfter };
+  } catch (e) {
+    try { await conn.rollback(); } catch {}
+    if (DEBUG) console.warn('[dialer.call.bill] chargeDialerOutboundCallLog failed:', e?.message || e);
+    return { ok: false, reason: e?.message || 'charge_failed' };
+  } finally {
+    conn.release();
+  }
+}
+
+async function billUnchargedDialerOutboundCallsForUser({ localUserId, limit = 200 }) {
+  if (!pool || !localUserId) return { processed: 0, charged: 0, skipped: 0, failed: 0 };
+  try {
+    const safeLimit = Math.max(1, Math.min(1000, parseInt(String(limit || '200'), 10) || 200));
+    const [rows] = await pool.query(
+      `SELECT l.id, l.call_id, l.duration_sec, l.price,
+              d.phone_number AS to_number
+       FROM dialer_call_logs l
+       LEFT JOIN dialer_leads d ON d.id = l.lead_id
+       WHERE l.user_id = ?
+         AND COALESCE(l.duration_sec, 0) > 0
+         AND l.billed = 0
+         AND l.status IN ('completed','connected')
+         AND (l.result IS NULL OR l.result <> 'failed')
+       ORDER BY l.created_at ASC, l.id ASC
+       LIMIT ${safeLimit}`,
+      [localUserId]
+    );
+
+    let processed = 0;
+    let charged = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const r of rows || []) {
+      processed += 1;
+      const billsec = Number(r.duration_sec || 0);
+      const rate = rateDialerOutboundCallPrice({ billsec });
+      const amount = (Number(r.price || 0) > 0) ? Number(r.price || 0) : Number(rate.price || 0);
+      const desc = `AI outbound call – ${String(r.to_number || '').trim() || String(r.call_id || '')}`.slice(0, 255);
+
+      const charge = await chargeDialerOutboundCallLog({
+        dialerCallLogId: r.id,
+        userId: localUserId,
+        amount,
+        description: desc
+      });
+
+      if (charge && charge.ok && !charge.alreadyBilled && !charge.skipped) charged += 1;
+      else if (charge && (charge.alreadyBilled || charge.skipped)) skipped += 1;
+      else failed += 1;
+    }
+
+    return { processed, charged, skipped, failed };
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.call.bill] billUnchargedDialerOutboundCallsForUser failed:', e?.message || e);
+    return { processed: 0, charged: 0, skipped: 0, failed: 0 };
+  }
+}
+
 // Backfill/compute per-call price for dialer outbound calls.
 async function backfillDialerCallPricesForUser({ localUserId, limit = 500 }) {
   if (!pool || !localUserId) return;
@@ -18346,6 +18573,20 @@ async function runMarkupBillingTick() {
         await billUnchargedAiInboundCallsForUser({ localUserId, limit: 200 });
       } catch (e) {
         if (DEBUG) console.warn('[billing.ai.inbound] Failed:', e?.message || e);
+      }
+
+      // Keep outbound dialer prices populated for call history.
+      try {
+        await backfillDialerCallPricesForUser({ localUserId, limit: 200 });
+      } catch (e) {
+        if (DEBUG) console.warn('[billing.dialer.price] Failed:', e?.message || e);
+      }
+
+      // Bill any completed outbound dialer calls that are still unbilled (idempotent).
+      try {
+        await billUnchargedDialerOutboundCallsForUser({ localUserId, limit: 200 });
+      } catch (e) {
+        if (DEBUG) console.warn('[billing.dialer.outbound] Failed:', e?.message || e);
       }
 
       // If enabled, keep AI number routing synced with balance (disable when credit < threshold, re-enable when sufficient)
