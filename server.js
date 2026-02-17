@@ -15726,8 +15726,8 @@ app.post('/webhooks/daily/events', async (req, res) => {
                FROM dialer_leads
                WHERE REGEXP_REPLACE(phone_number, '[^0-9]', '') = ?
                  AND status IN ('queued','dialing','pending','answered','voicemail','transferred')
-                 AND updated_at >= DATE_SUB(?, INTERVAL 12 HOUR)
-               ORDER BY updated_at DESC, id DESC
+                 AND COALESCE(last_call_at, created_at) >= DATE_SUB(?, INTERVAL 12 HOUR)
+               ORDER BY COALESCE(last_call_at, created_at) DESC, id DESC
                LIMIT 1`,
               [toDigits, ts]
             );
@@ -15852,8 +15852,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
                    WHEN ? = 'transferred' THEN 'transferred'
                    WHEN status IN ('answered','voicemail','transferred') THEN status
                    ELSE 'completed'
-                 END,
-                 updated_at = CURRENT_TIMESTAMP
+                 END
                  WHERE id = ? AND user_id = ? LIMIT 1`,
                 [statusToken, statusToken, statusToken, leadRow.id, leadRow.user_id]
               );
@@ -15862,7 +15861,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
               const setLastCall = (type === 'dialout.started' || type === 'dialout.connected' || type === 'dialout.answered');
               const [r] = await pool.execute(
                 `UPDATE dialer_leads
-                 SET status = ?, updated_at = CURRENT_TIMESTAMP${setLastCall ? ', last_call_at = NOW()' : ''}
+                 SET status = ?${setLastCall ? ', last_call_at = NOW()' : ''}
                  WHERE id = ? AND user_id = ? LIMIT 1`,
                 [leadStatus, leadRow.id, leadRow.user_id]
               );
@@ -15881,8 +15880,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
                SET status = COALESCE(?, status),
                    result = COALESCE(?, result),
                    duration_sec = COALESCE(?, duration_sec),
-                   notes = CASE WHEN ? <> '' THEN COALESCE(NULLIF(notes,''), ?) ELSE notes END,
-                   updated_at = CURRENT_TIMESTAMP
+                   notes = CASE WHEN ? <> '' THEN COALESCE(NULLIF(notes,''), ?) ELSE notes END
                ${whereClause}`,
               [statusVal, resultOut, durationOut, notes, notes].concat(whereParams)
             );
