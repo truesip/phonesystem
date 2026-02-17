@@ -1932,6 +1932,7 @@
     let meProfile = null;
     var billingPage = 0;
     var billingPageSize = 20;
+    let billingData = [];
     const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), dialer:$('#tab-dialer'), billing:$('#tab-billing'), ai:$('#tab-ai'), cdr:$('#tab-cdr')};
     const views = {overview:$('#view-overview'), profile:$('#view-profile'), dialer:$('#view-dialer'), billing:$('#view-billing'), ai:$('#view-ai'), cdr:$('#view-cdr')};
     function activate(name){
@@ -7730,7 +7731,6 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
 
 
     // ========== Billing History ==========
-    let billingData = [];
     
     async function loadBillingHistory() {
       const emptyEl = $('#billing-empty');

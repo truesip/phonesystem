@@ -905,19 +905,51 @@ async function creditBalance(userId, amount, description, paymentMethod, referen
   return await updateUserBalance(userId, Math.abs(amount), description, 'credit', paymentMethod, referenceId);
 }
 
-async function storeCdr(userId, direction, srcNumber, dstNumber, didNumber, timeStart, timeEnd, duration, billsec, price, status, aiAgentId, campaignId, sessionId) {
+async function storeCdr(userIdOrPayload, direction, srcNumber, dstNumber, didNumber, timeStart, timeEnd, duration, billsec, price, status, aiAgentId, campaignId, sessionId) {
   try {
     if (!pool) throw new Error('Database not configured');
+
+    // Backward-compatible API:
+    // 1) Positional args (legacy callers)
+    // 2) Single object payload (newer callers)
+    const payload = (userIdOrPayload && typeof userIdOrPayload === 'object' && !Array.isArray(userIdOrPayload))
+      ? userIdOrPayload
+      : null;
+
+    const userIdVal = payload ? payload.userId : userIdOrPayload;
+    const directionVal = payload ? (payload.direction || direction || 'inbound') : direction;
+    const srcNumberVal = payload ? (payload.srcNumber ?? payload.fromNumber ?? srcNumber ?? null) : srcNumber;
+    const dstNumberVal = payload ? (payload.dstNumber ?? payload.toNumber ?? dstNumber ?? null) : dstNumber;
+    const didNumberVal = payload ? (payload.didNumber ?? payload.toNumber ?? didNumber ?? null) : didNumber;
+    const timeStartVal = payload ? (payload.timeStart ?? payload.startTime ?? timeStart ?? null) : timeStart;
+    const timeEndVal = payload ? (payload.timeEnd ?? payload.endTime ?? timeEnd ?? null) : timeEnd;
+    const durationVal = payload ? (payload.duration ?? duration ?? null) : duration;
+    const billsecVal = payload ? (payload.billsec ?? billsec ?? null) : billsec;
+    const priceVal = payload ? (payload.price ?? payload.cost ?? price ?? null) : price;
+    const statusVal = payload ? (payload.status ?? status ?? null) : status;
+    const aiAgentIdVal = payload ? (payload.aiAgentId ?? payload.agentId ?? aiAgentId ?? null) : aiAgentId;
+    const campaignIdVal = payload ? (payload.campaignId ?? campaignId ?? null) : campaignId;
+    const sessionIdVal = payload ? (payload.sessionId ?? sessionId ?? null) : sessionId;
+
+    if (!userIdVal) throw new Error('Missing userId for CDR insert');
     await pool.query(
       `INSERT INTO cdrs
        (user_id, direction, src_number, dst_number, did_number, time_start, time_end,
         duration, billsec, price, status, ai_agent_id, campaign_id, session_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [userId, direction, srcNumber, dstNumber, didNumber, timeStart, timeEnd,
-       duration, billsec, price, status, aiAgentId, campaignId, sessionId]
+      [userIdVal, directionVal, srcNumberVal, dstNumberVal, didNumberVal, timeStartVal, timeEndVal,
+       durationVal, billsecVal, priceVal, statusVal, aiAgentIdVal, campaignIdVal, sessionIdVal]
     );
     if (DEBUG) {
-      console.log('[storeCdr]', { userId, direction, srcNumber, dstNumber, duration, price, status });
+      console.log('[storeCdr]', {
+        userId: userIdVal,
+        direction: directionVal,
+        srcNumber: srcNumberVal,
+        dstNumber: dstNumberVal,
+        duration: durationVal,
+        price: priceVal,
+        status: statusVal
+      });
     }
     return { success: true };
   } catch (err) {
@@ -16153,7 +16185,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
                 const ratePerMin = AI_INBOUND_LOCAL_RATE_PER_MIN || 0;
                 const cost = billsecVal > 0 ? (billsecVal / 60) * ratePerMin : 0;
 
-                await storeCdr({
+                const cdrWrite = await storeCdr({
                   userId: logRow.user_id,
                   direction: 'inbound',
                   callType: 'ai_agent',
@@ -16168,13 +16200,20 @@ app.post('/webhooks/daily/events', async (req, res) => {
                   status: logRow.status || 'completed',
                   agentId: logRow.agent_id || null
                 });
-
-                if (DEBUG) {
-                  console.log('[daily.webhook] Stored CDR for completed AI call:', {
+                if (cdrWrite && cdrWrite.success) {
+                  if (DEBUG) {
+                    console.log('[daily.webhook] Stored CDR for completed AI call:', {
+                      userId: logRow.user_id,
+                      callId: logRow.call_id,
+                      duration: logRow.duration,
+                      cost: cost.toFixed(4)
+                    });
+                  }
+                } else if (DEBUG) {
+                  console.warn('[daily.webhook] CDR insert failed for completed AI call:', {
                     userId: logRow.user_id,
                     callId: logRow.call_id,
-                    duration: logRow.duration,
-                    cost: cost.toFixed(4)
+                    error: cdrWrite?.error || 'unknown_error'
                   });
                 }
               }
