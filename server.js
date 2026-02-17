@@ -2049,6 +2049,28 @@ async function initDb() {
 
   await ensureBigintPK('dialer_leads');
 
+  // Ensure dialer_leads columns exist (schema may pre-date current DDL)
+  for (const col of [
+    { name: 'user_id', ddl: 'ALTER TABLE dialer_leads ADD COLUMN user_id BIGINT NULL' },
+    { name: 'lead_name', ddl: 'ALTER TABLE dialer_leads ADD COLUMN lead_name VARCHAR(191) NULL' },
+    { name: 'metadata', ddl: 'ALTER TABLE dialer_leads ADD COLUMN metadata JSON NULL' },
+    { name: 'attempt_count', ddl: 'ALTER TABLE dialer_leads ADD COLUMN attempt_count INT NOT NULL DEFAULT 0' },
+    { name: 'last_call_at', ddl: 'ALTER TABLE dialer_leads ADD COLUMN last_call_at DATETIME NULL' }
+  ]) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='dialer_leads' AND column_name=? LIMIT 1",
+        [dbName, col.name]
+      );
+      if (!rows || !rows.length) {
+        await pool.query(col.ddl);
+        if (DEBUG) console.log(`[schema] Added dialer_leads.${col.name} column`);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn(`[schema] dialer_leads.${col.name} check failed`, e.message || e);
+    }
+  }
+
   await pool.query(`CREATE TABLE IF NOT EXISTS dialer_call_logs (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     campaign_id BIGINT NOT NULL,
@@ -10341,6 +10363,106 @@ async function cancelAiNumberForNonpayment({ localUserId, aiNumberId, dailyNumbe
   } catch {}
 
   return { ok: true };
+}
+
+// Charge a single AI number's monthly fee via balance deduction.
+// Returns { ok: true } on success.
+async function chargeAiNumberMonthlyFee({ userId, aiNumberId, phoneNumber, monthlyAmount, isTollfree, billedTo }) {
+  if (!pool || !userId || !aiNumberId || !monthlyAmount) return { ok: false, reason: 'missing_params' };
+  const typeLabel = isTollfree ? 'toll-free' : 'local';
+  const description = `AI ${typeLabel} DID monthly fee – ${phoneNumber || aiNumberId}`;
+  const result = await deductBalance(userId, monthlyAmount, description);
+  if (!result || !result.success) {
+    return { ok: false, reason: result?.error || 'deduction_failed' };
+  }
+  // Update the billing marker
+  try {
+    const billedToDb = toMysqlDatetime(billedTo);
+    if (billedToDb) {
+      await pool.execute(
+        'INSERT INTO ai_number_markups (user_id, ai_number_id, last_billed_to) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_billed_to = GREATEST(COALESCE(last_billed_to, VALUES(last_billed_to)), VALUES(last_billed_to))',
+        [userId, aiNumberId, billedToDb]
+      );
+    }
+  } catch {}
+  return { ok: true };
+}
+
+// Iterate a user's AI numbers and charge monthly fees with cycle-table idempotency.
+async function billAiNumberMonthlyFeesForUser({ localUserId, aiNumbers }) {
+  if (!pool || !localUserId) return;
+  const localFee = parseFloat(process.env.AI_DID_LOCAL_MONTHLY_FEE || process.env.DID_LOCAL_MONTHLY_MARKUP || '0') || 0;
+  const tollfreeFee = parseFloat(process.env.AI_DID_TOLLFREE_MONTHLY_FEE || process.env.DID_TOLLFREE_MONTHLY_MARKUP || '0') || 0;
+  if (!localFee && !tollfreeFee) return;
+
+  for (const num of (aiNumbers || [])) {
+    const aiNumberId = num.id != null ? String(num.id) : '';
+    const phoneNumber = String(num.phone_number || '').trim();
+    if (!aiNumberId) continue;
+
+    const isTollfree = detectTollfreeUsCaByNpa(phoneNumber);
+    const monthlyAmount = isTollfree ? tollfreeFee : localFee;
+    if (!monthlyAmount || monthlyAmount <= 0) continue;
+
+    // Compute the next billing period
+    const createdAt = num.created_at instanceof Date ? num.created_at : new Date(num.created_at || Date.now());
+    let billedTo = null;
+    try {
+      const [mrows] = await pool.execute(
+        'SELECT last_billed_to FROM ai_number_markups WHERE user_id = ? AND ai_number_id = ? LIMIT 1',
+        [localUserId, aiNumberId]
+      );
+      const lastBilled = mrows && mrows[0] && mrows[0].last_billed_to;
+      if (lastBilled) {
+        billedTo = addMonthsClamped(new Date(lastBilled), 1);
+      } else {
+        billedTo = addMonthsClamped(createdAt, 1);
+      }
+    } catch {
+      billedTo = addMonthsClamped(createdAt, 1);
+    }
+
+    if (!billedTo || !Number.isFinite(billedTo.getTime())) continue;
+    // Only bill if the billing period has arrived
+    if (billedTo.getTime() > Date.now()) continue;
+
+    const billedToDb = toMysqlDatetime(billedTo);
+    // Cycle-table idempotency: INSERT IGNORE prevents double-billing the same period
+    try {
+      const [insRes] = await pool.execute(
+        'INSERT IGNORE INTO ai_number_markup_cycles (user_id, ai_number_id, billed_to) VALUES (?, ?, ?)',
+        [localUserId, aiNumberId, billedToDb]
+      );
+      if (!insRes || insRes.affectedRows === 0) continue; // Already billed
+    } catch {
+      continue;
+    }
+
+    const chargeRes = await chargeAiNumberMonthlyFee({
+      userId: localUserId,
+      aiNumberId,
+      phoneNumber,
+      monthlyAmount,
+      isTollfree,
+      billedTo
+    });
+
+    if (!chargeRes || !chargeRes.ok) {
+      // Roll back cycle marker for retry
+      try {
+        await pool.execute(
+          'DELETE FROM ai_number_markup_cycles WHERE user_id = ? AND ai_number_id = ? AND billed_to = ?',
+          [localUserId, aiNumberId, billedToDb]
+        );
+      } catch {}
+      // If enabled, mark for cancellation
+      if (AI_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE) {
+        try {
+          await markAiNumberCancelPending({ localUserId, aiNumberId, billedTo });
+        } catch {}
+      }
+    }
+  }
 }
 
 async function processAiCancelPendingForUser({ localUserId, limit = 100 }) {
