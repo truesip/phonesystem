@@ -1,0 +1,26 @@
+# Git
+.git
+.gitignore
+
+# Dependencies (rebuilt inside container via npm ci)
+node_modules
+
+# Environment (injected by App Platform)
+.env
+.env.*
+
+# Docker / DO config
+Dockerfile
+.do
+.dockerignore
+
+# Pipecat agent (separate container)
+pipecat-agent
+
+# Logs / misc
+logs
+*.log
+*.pid
+*.bak
+*.backup
+*.md

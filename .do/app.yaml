@@ -1,0 +1,260 @@
+name: phonesystem
+region: nyc
+services:
+  - name: web
+    github:
+      repo: your-github-username/phonesystem
+      branch: main
+      deploy_on_push: true
+    dockerfile_path: Dockerfile
+    instance_count: 1
+    instance_size_slug: professional-xs
+    http_port: 8080
+    routes:
+      - path: /
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 15
+      period_seconds: 30
+      timeout_seconds: 5
+      failure_threshold: 3
+    envs:
+      # ── Core ──
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "8080"
+      - key: DEBUG
+        value: "0"
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: SESSION_SECRET
+        type: SECRET
+      - key: ADMIN_TOKEN
+        type: SECRET
+
+      # ── Database ──
+      - key: DATABASE_URL
+        type: SECRET
+
+      # ── Email / SMTP2GO ──
+      - key: SMTP2GO_API_KEY
+        type: SECRET
+      - key: SMTP2GO_SENDER
+        value: no-reply@callchimp.site
+      - key: SENDER_DOMAIN
+        value: callchimp.site
+      - key: EMAIL_VERIFICATION_TTL_MINUTES
+        value: "10"
+      - key: PASSWORD_RESET_TTL_MINUTES
+        value: "15"
+      - key: PASSWORD_RESET_MAX_ATTEMPTS
+        value: "5"
+      - key: ADMIN_NOTIFY_EMAIL
+        value: partners@truesip.net
+
+      # ── Pipecat Cloud + Daily ──
+      - key: PIPECAT_PRIVATE_API_KEY
+        type: SECRET
+      - key: PIPECAT_PUBLIC_API_KEY
+        type: SECRET
+      - key: PIPECAT_API_URL
+        value: https://api.pipecat.daily.co/v1
+      - key: PIPECAT_ORG_ID
+        type: SECRET
+      - key: PIPECAT_AGENT_IMAGE
+        value: truesip/agentPhone.System:inbound-transfer-fix-2026-02-14-234711
+      - key: PIPECAT_REGION
+        value: us-west
+      - key: PIPECAT_AGENT_PROFILE
+        value: agent-2x
+      - key: PIPECAT_MIN_AGENTS
+        value: "0"
+      - key: PIPECAT_MAX_AGENTS
+        value: "50"
+      - key: PIPECAT_ENABLE_KRISP
+        value: "1"
+      - key: PIPECAT_DIALIN_WEBHOOK_BASE
+        value: https://api.pipecat.daily.co/v1/public/webhooks
+
+      # ── Daily Telephony ──
+      - key: DAILY_API_KEY
+        type: SECRET
+      - key: DAILY_API_URL
+        value: https://api.daily.co/v1
+      - key: DAILY_DIALIN_WEBHOOK_TOKEN
+        type: SECRET
+
+      # ── AI dial-in webhook ──
+      - key: AI_DIALIN_WEBHOOK_BASE
+        value: https://www.Phone.System.net/webhooks/daily/dialin
+
+      # ── Dialer (outbound) ──
+      - key: DIALER_WORKER_INTERVAL_SECONDS
+        value: "10"
+      - key: DIALER_DAILY_ROOM_TTL_SECONDS
+        value: "1800"
+      - key: DIALER_OUTBOUND_RATE_PER_MIN
+        value: "0.015"
+      - key: DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE
+        value: "0"
+
+      # ── Provider API keys ──
+      - key: DEEPGRAM_API_KEY
+        type: SECRET
+      - key: CARTESIA_API_KEY
+        type: SECRET
+      - key: XAI_API_KEY
+        type: SECRET
+
+      # ── Video avatar (Akool) ──
+      - key: VIDEO_AVATAR_PROVIDER
+        value: akool
+      - key: AKOOL_API_KEY
+        type: SECRET
+      - key: AKOOL_AVATAR_ID
+        value: dvp_sergey_bg
+      - key: AKOOL_API_BASE_URL
+        value: https://openapi.akool.com
+      - key: AKOOL_VOICE_ID
+        value: 6889b7f3662160e2caad60e7
+      - key: AKOOL_MODE_TYPE
+        value: "1"
+      - key: AKOOL_DURATION_SECONDS
+        value: "1800"
+      - key: AKOOL_VISION_ENABLED
+        value: "1"
+      - key: AKOOL_VISION_FPS
+        value: "3"
+      - key: AKOOL_VISION_LLM_ENABLED
+        value: "1"
+      - key: AKOOL_VISION_LLM_MODEL
+        value: grok-4
+      - key: AKOOL_VISION_LLM_ATTACH_MODE
+        value: auto
+      - key: AKOOL_VISION_LLM_MAX_DIM
+        value: "512"
+      - key: AKOOL_VISION_LLM_JPEG_QUALITY
+        value: "65"
+      - key: AKOOL_VISION_LLM_MAX_AGE_S
+        value: "5"
+
+      # ── HeyGen (optional) ──
+      - key: HEYGEN_API_KEY
+        type: SECRET
+      - key: HEYGEN_AVATAR_ID
+        value: Brandon_Business_Sitting_Front_public
+
+      # ── Per-user limits ──
+      - key: PHONE_SYSTEM_MAX_CUSTOMERS
+        value: "5"
+      - key: AI_MAX_AGENTS
+        value: "5"
+      - key: AI_MAX_NUMBERS
+        value: "5"
+
+      # ── AI tool pricing ──
+      - key: AI_EMAIL_SEND_COST
+        value: "1"
+      - key: AI_VIDEO_MEETING_LINK_COST
+        value: "5"
+      - key: AI_SMS_SEND_COST
+        value: "0.1"
+
+      # ── Inbound billing ──
+      - key: INBOUND_LOCAL_RATE_PER_MIN
+        value: "0.015"
+      - key: INBOUND_TOLLFREE_RATE_PER_MIN
+        value: "0.02"
+      - key: AI_INBOUND_LOCAL_RATE_PER_MIN
+        value: "0.015"
+      - key: AI_INBOUND_TOLLFREE_RATE_PER_MIN
+        value: "0.02"
+      - key: AI_INBOUND_BILLING_ROUND_UP_TO_MINUTE
+        value: "0"
+      - key: AI_INBOUND_MIN_CREDIT
+        value: "0"
+      - key: AI_INBOUND_DISABLE_NUMBERS_WHEN_BALANCE_LOW
+        value: "1"
+      - key: AI_INBOUND_BALANCE_FAIL_CLOSED
+        value: "0"
+
+      # ── AI DID monthly fees ──
+      - key: AI_DID_LOCAL_MONTHLY_FEE
+        value: "10.20"
+      - key: AI_DID_TOLLFREE_MONTHLY_FEE
+        value: "25.20"
+      - key: AI_MONTHLY_CANCEL_ON_INSUFFICIENT_BALANCE
+        value: "0"
+      - key: AI_MONTHLY_GRACE_DAYS
+        value: "3"
+      - key: BILLING_MARKUP_INTERVAL_MINUTES
+        value: "5"
+
+      # ── AI caller memory ──
+      - key: AI_CALLER_MEMORY_ENABLE
+        value: "1"
+      - key: AI_CALLER_MEMORY_MAX_CALLS
+        value: "1"
+      - key: AI_CALLER_MEMORY_MAX_MESSAGES
+        value: "20"
+      - key: AI_CALLER_MEMORY_MAX_CHARS_PER_MESSAGE
+        value: "500"
+      - key: AI_CALLER_MEMORY_MAX_DAYS
+        value: "30"
+
+      # ── NOWPayments (crypto) ──
+      - key: NOWPAYMENTS_API_KEY
+        type: SECRET
+      - key: NOWPAYMENTS_PUBLIC_KEY
+        type: SECRET
+      - key: NOWPAYMENTS_IPN_SECRET
+        type: SECRET
+      - key: PUBLIC_BASE_URL
+        value: https://www.Phone.System.net
+
+      # ── Square (card payments) ──
+      - key: CARD_PAYMENT_PROVIDER
+        value: square
+      - key: SQUARE_ENVIRONMENT
+        value: production
+      - key: SQUARE_APPLICATION_ID
+        type: SECRET
+      - key: SQUARE_ACCESS_TOKEN
+        type: SECRET
+      - key: SQUARE_LOCATION_ID
+        value: LYAXASNXXSQPZ
+      - key: SQUARE_WEBHOOK_SIGNATURE_KEY
+        type: SECRET
+      - key: SQUARE_WEBHOOK_NOTIFICATION_URL
+        value: https://www.Phone.System.net/webhooks/square
+      - key: CHECKOUT_MIN_AMOUNT
+        value: "100"
+      - key: CHECKOUT_MAX_AMOUNT
+        value: "250"
+
+      # ── Click2Mail (physical mail) ──
+      - key: AI_PHYSICAL_MAIL_ENABLED
+        value: "1"
+      - key: CLICK2MAIL_USERNAME
+        type: SECRET
+      - key: CLICK2MAIL_PASSWORD
+        type: SECRET
+      - key: CLICK2MAIL_REST_BASE_URL
+        value: https://rest.click2mail.com
+      - key: CLICK2MAIL_BATCH_BASE_URL
+        value: https://batch.click2mail.com
+      - key: CLICK2MAIL_APP_SIGNATURE
+        value: Phone.System
+      - key: AI_MAIL_MARKUP_FLAT
+        value: "0"
+      - key: AI_MAIL_MARKUP_PERCENT
+        value: "0"
+
+      # ── Encryption ──
+      - key: USER_SMTP_ENCRYPTION_KEY
+        type: SECRET
+
+      # ── LibreOffice (set by Dockerfile) ──
+      - key: LIBREOFFICE_BIN
+        value: /usr/bin/soffice

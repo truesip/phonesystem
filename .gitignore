@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Runtime
+server.pid
+*.pid
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Backups
+*.bak
+*.bak2
+*.backup

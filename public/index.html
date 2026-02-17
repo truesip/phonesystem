@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phone.System - Sign Up</title>
+    <style>
+        :root{
+            --bg:#f8f9fa;
+            --bg2:#ffffff;
+            --card:#ffffff;
+            --card2:#f1f3f5;
+            --border:rgba(0,0,0,.12);
+            --text:rgba(0,0,0,.87);
+            --muted:rgba(0,0,0,.60);
+            --muted2:rgba(0,0,0,.45);
+            --primary:#10b981;
+            --accent:#10b981;
+            --accent2:#059669;
+            --shadow:0 2px 12px rgba(0,0,0,.10);
+            --radius:12px;
+            --radius2:16px;
+            --max:1200px;
+        }
+
+        *{margin:0;padding:0;box-sizing:border-box}
+        html,body{height:100%}
+        body{
+            font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+            background: var(--bg);
+            color:var(--text);
+            overflow-x:hidden;
+            min-height:100vh;
+            display:flex;
+            flex-direction:column;
+        }
+        a{color:inherit}
+
+        /* Navigation */
+        nav{
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            background: #ffffff;
+            border-bottom:1px solid rgba(0,0,0,.12);
+            box-shadow: 0 1px 3px rgba(0,0,0,.06);
+        }
+        .nav-container{
+            max-width:var(--max);
+            margin:0 auto;
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            padding:16px 20px;
+            gap:18px;
+        }
+        .logo{
+            font-weight:800;
+            letter-spacing:.2px;
+            font-size:18px;
+            display:flex;
+            align-items:center;
+            gap:10px;
+            text-decoration:none;
+            color:var(--text);
+            white-space:nowrap;
+        }
+        .brand__mark{
+            width:34px;height:34px;
+            border-radius:10px;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            box-shadow: 0 2px 8px rgba(16,185,129,.20);
+            display:inline-block;
+            flex:none;
+        }
+        .brand__text{display:flex;flex-direction:column;line-height:1.1}
+        .brand__text small{font-weight:600;color:var(--muted2);font-size:11px}
+        .nav-links{display:flex;gap:18px;list-style:none;align-items:center;margin-left:auto}
+        .nav-links a{
+            text-decoration:none;
+            color:var(--muted);
+            font-weight:600;
+            font-size:14px;
+            padding:10px 10px;
+            border-radius:10px;
+            transition: background .15s ease, color .15s ease;
+        }
+        .nav-links a:hover{color:var(--text);background:rgba(0,0,0,.04)}
+
+        .nav-login{
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+            gap:10px;
+            text-decoration:none;
+            border-radius:12px;
+            padding:11px 14px;
+            font-weight:800;
+            font-size:14px;
+            border:1px solid rgba(0,0,0,.15);
+            background: #ffffff;
+            transition: transform .15s ease, background .15s ease, border-color .15s ease;
+            white-space:nowrap;
+            color:var(--text);
+        }
+        .nav-login:hover{transform: translateY(-1px); background: #f8f9fa; border-color: rgba(0,0,0,.25); color:var(--text)}
+
+        .nav-cta{
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+            gap:10px;
+            text-decoration:none;
+            border-radius:12px;
+            padding:11px 14px;
+            font-weight:900;
+            font-size:14px;
+            border:1px solid #10b981;
+            background: #10b981;
+            color:#ffffff !important;
+            transition: transform .15s ease, border-color .15s ease;
+            white-space:nowrap;
+        }
+        .nav-cta:hover{transform: translateY(-1px); border-color: #059669; background:#059669}
+
+        @media (max-width: 768px){ .nav-links { display:none; } }
+
+        /* Main */
+        .main-content{
+            flex: 1;
+            display: grid;
+            place-items: center;
+            padding: 70px 20px 40px;
+        }
+
+        .container{
+            border-radius: var(--radius2);
+            border:1px solid rgba(0,0,0,.12);
+            background: #ffffff;
+            box-shadow: var(--shadow);
+            max-width: 360px;
+            width: calc(100% - 24px);
+            padding: 18px;
+            position: relative;
+            overflow: hidden;
+        }
+        .container > *{position:relative}
+
+        .header{text-align:center;margin-bottom:10px}
+        .header h1{color:var(--text);font-size:18px;margin-bottom:4px;letter-spacing:-.01em}
+        .header p{color:var(--muted);font-size:12px;line-height:1.6}
+
+        #alert{border-radius:14px}
+
+        .form-group{margin-bottom:10px}
+        label{display:block;color:var(--text);font-size:12px;font-weight:800;margin-bottom:5px}
+
+        input, select{
+            width:100%;
+            padding:10px 12px;
+            border:1px solid rgba(0,0,0,.20);
+            border-radius:10px;
+            font-size:13px;
+            transition: all 0.2s ease;
+            background: #ffffff;
+            color: var(--text);
+        }
+        input::placeholder{color:var(--muted2)}
+        input:focus, select:focus{
+            outline:none;
+            border-color: #10b981;
+            box-shadow: 0 0 0 3px rgba(16,185,129,.15);
+            background: #ffffff;
+        }
+
+        .required{color:#dc2626}
+
+        .btn{
+            width: 100%;
+            padding: 10px 12px;
+            background: #10b981;
+            color: #ffffff;
+            border: none;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 950;
+            cursor: pointer;
+            transition: transform .15s ease, box-shadow .15s ease;
+            margin-top: 4px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            text-decoration: none;
+            box-shadow: 0 2px 8px rgba(16,185,129,.20);
+        }
+        .btn:hover{transform: translateY(-1px); box-shadow: 0 4px 12px rgba(16,185,129,.30); background:#059669}
+        .btn:active{transform: translateY(0)}
+        .btn:disabled{opacity:0.6;cursor:not-allowed;transform:none;box-shadow:none}
+
+        .btn-outline{
+            background: #f8f9fa;
+            color: var(--text);
+            border: 1px solid rgba(0,0,0,.15);
+            box-shadow: none;
+        }
+        .btn-outline:hover{background: #e9ecef}
+
+        .alert{padding:12px 14px;border-radius:14px;margin-bottom:14px;font-size:13px;display:none}
+        .alert.show{display:block}
+
+        .alert-success{background: rgba(16,185,129,.10); border:1px solid rgba(16,185,129,.30); color: #16a34a}
+        .alert-error{background: rgba(239,68,68,.08); border:1px solid rgba(239,68,68,.30); color: #dc2626}
+
+        .loading{display:inline-block;width:14px;height:14px;border:2px solid #10b981;border-radius:50%;border-top-color:transparent;animation: spin 0.8s linear infinite;margin-right:8px}
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .footer{text-align:center;margin-top:10px;color:var(--muted2);font-size:12px}
+        .footer a{color:#10b981;text-decoration:underline;text-decoration-color: rgba(16,185,129,.50);text-underline-offset:3px}
+        .footer a:hover{color:#059669;text-decoration-color: #10b981}
+
+        .success-box{text-align:left}
+        .details{
+            background: rgba(0,0,0,.18);
+            border:1px solid rgba(255,255,255,.10);
+            border-radius: 14px;
+            padding: 16px;
+            margin-top: 14px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 13px;
+        }
+        .details .row{display:flex;justify-content:space-between;gap:14px;padding:8px 0;border-bottom:1px dashed rgba(255,255,255,.14)}
+        .details .row:last-child{border-bottom:0}
+        .details .key{color:rgba(255,255,255,.70)}
+        .details .val{color:rgba(255,255,255,.92);font-weight:800;word-break:break-word;text-align:right}
+
+        .actions{margin-top:16px;display:flex;gap:10px;flex-wrap:wrap}
+        .actions .btn{flex:1;min-width:160px}
+
+        .resend-msg{font-size:13px;color:rgba(255,255,255,.78);margin-top:10px}
+        .help{font-size:12px;margin-top:6px;color:rgba(255,255,255,.65)}
+        .help-error{color:#fca5a5}
+        .help-ok{color:#86efac}
+
+        /* Footer */
+        .site-footer{background: #0a0a0a;border-top: 1px solid rgba(255,255,255,.08);padding:28px 20px 20px;text-align:center;margin-top:auto}
+        .footer-brand{font-weight:900;font-size:18px;letter-spacing:.2px;color:#fff;margin-bottom:4px}
+        .footer-tagline{color:rgba(255,255,255,.60);font-size:13px;margin-bottom:12px}
+        .footer-contact{color:rgba(255,255,255,.72);font-size:13px;line-height:1.7}
+        .footer-contact div{margin:2px 0}
+        .footer-links{margin-top:14px;font-size:12px;color:rgba(255,255,255,.62)}
+        .footer-links a{color:rgba(255,255,255,.62);margin:0 6px;text-decoration:none}
+        .footer-links a:hover{color:#fff;text-decoration:underline}
+        .footer-copyright{margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.08);color:rgba(255,255,255,.52);font-size:12px}
+    </style>
+</head>
+<body>
+    <div class="main-content">
+    <div class="container">
+        <div class="header">
+            <h1>Create Your Account</h1>
+            <p>Sign up for Phone.System</p>
+        </div>
+
+        <div id="alert" class="alert"></div>
+
+        <form id="signupForm">
+            <div class="form-group">
+                <label for="username">Username <span class="required">*</span></label>
+<input type="text" id="username" name="username" placeholder="Letters & numbers only, max 10" pattern="[A-Za-z0-9]{1,10}" title="Letters and numbers only, maximum 10 characters" required>
+                <div id="usernameHelp" class="help"></div>
+            </div>
+
+            <div class="form-group">
+                <label for="password">Password <span class="required">*</span></label>
+<input type="password" id="password" name="password" placeholder="Letters & numbers only, max 10" pattern="[A-Za-z0-9]{1,10}" title="Letters and numbers only, maximum 10 characters" required>
+            </div>
+
+            <div class="form-group">
+                <label for="firstname">First Name <span class="required">*</span></label>
+                <input type="text" id="firstname" name="firstname" placeholder="John" required>
+            </div>
+
+            <div class="form-group">
+                <label for="lastname">Last Name <span class="required">*</span></label>
+                <input type="text" id="lastname" name="lastname" placeholder="Doe" required>
+            </div>
+
+            <div class="form-group">
+                <label for="email">Email <span class="required">*</span></label>
+                <input type="email" id="email" name="email" placeholder="your.email@example.com" required>
+                <div id="emailHelp" class="help"></div>
+            </div>
+
+            <div class="form-group">
+                <label for="phone">Phone Number <span class="required">*</span></label>
+                <input type="tel" id="phone" name="phone" placeholder="12345678901" pattern="\d{11}" title="Numbers only, exactly 11 digits" required>
+            </div>
+
+            <button type="submit" class="btn" id="submitBtn">
+                Sign Up
+            </button>
+        </form>
+
+        <div class="footer">
+            <p>Already have an account? <a href="/login">Login</a></p>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('signupForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const usernameHelp = document.getElementById('usernameHelp');
+        const emailHelp = document.getElementById('emailHelp');
+
+        function showAlert(message, type) {
+            const alertBox = document.getElementById('alert');
+            if (!alertBox) {
+                // Fallback if the current step doesn't render an alert element.
+                try { window.alert(message); } catch {}
+                return;
+            }
+            alertBox.textContent = message;
+            alertBox.className = `alert alert-${type} show`;
+            
+            // Auto-hide after 5 seconds
+            setTimeout(() => {
+                alertBox.classList.remove('show');
+            }, 5000);
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Client-side rules: username <=10 alnum; password <=10 alnum
+            const pwd = document.getElementById('password').value;
+            const uname = document.getElementById('username').value;
+            if (!/^[A-Za-z0-9]{1,10}$/.test(uname)) {
+                showAlert('Username must be letters and numbers only, maximum 10 characters.', 'error');
+                return;
+            }
+            if (!/^[A-Za-z0-9]{1,10}$/.test(pwd)) {
+                showAlert('Password must be letters and numbers only, maximum 10 characters.', 'error');
+                return;
+            }
+
+            // Disable submit button
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="loading"></span>Continuing...';
+
+            // Get form data
+            const formData = {
+                username: document.getElementById('username').value,
+                password: document.getElementById('password').value,
+                firstname: document.getElementById('firstname').value,
+                lastname: document.getElementById('lastname').value,
+                email: document.getElementById('email').value,
+                phone: document.getElementById('phone').value
+            };
+
+            try {
+                // Check availability first
+                const availResp = await fetch(`/api/check-availability?username=${encodeURIComponent(formData.username)}&email=${encodeURIComponent(formData.email)}`);
+                const avail = await availResp.json();
+                // Clear inline helps
+                usernameHelp.textContent = ''; usernameHelp.className = 'help';
+                emailHelp.textContent = ''; emailHelp.className = 'help';
+                if (!avail.success || !avail.usernameAvailable || !avail.emailAvailable) {
+                    const msg = !avail.usernameAvailable && !avail.emailAvailable ? 'Username and email already exist' : (!avail.usernameAvailable ? 'Username already exists' : 'Email already exists');
+                    if (avail.usernameAvailable === false) { usernameHelp.textContent = 'Username already exists.'; usernameHelp.className = 'help help-error'; }
+                    if (avail.emailAvailable === false) { emailHelp.textContent = 'Email already exists.'; emailHelp.className = 'help help-error'; }
+                    showAlert(msg, 'error');
+                    return;
+                } else {
+                    usernameHelp.textContent = 'Username available'; usernameHelp.className = 'help help-ok';
+                    emailHelp.textContent = 'Email available'; emailHelp.className = 'help help-ok';
+                }
+
+                renderAddressStep({ original: formData });
+            } catch (error) {
+                showAlert('Network error. Please check your connection and try again.', 'error');
+                console.error('Error:', error);
+            } finally {
+                // Re-enable submit button
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Sign Up';
+            }
+        });
+
+        function renderAddressStep(data){
+            const c = document.querySelector('.container');
+            const email = (data && data.original && data.original.email) ? data.original.email : '';
+            c.innerHTML = `
+                <div class="header" style="margin-bottom:12px;">
+                    <h1>Billing Address</h1>
+                    <p>Please enter your address. Detected IP: <b id="detectedIp">Loading…</b></p>
+                </div>
+                <div id="alert" class="alert"></div>
+                <form id="addressForm">
+                    <div class="form-group">
+                        <label for="address1">Street Address <span class="required">*</span></label>
+                        <input type="text" id="address1" name="address1" placeholder="1209 Mountain Road PL NE" autocomplete="address-line1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="city">City <span class="required">*</span></label>
+                        <input type="text" id="city" name="city" placeholder="Albuquerque" autocomplete="address-level2" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="state">State / Province <span class="required">*</span></label>
+                        <input type="text" id="state" name="state" placeholder="NM" autocomplete="address-level1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="postal_code">ZIP / Postal Code <span class="required">*</span></label>
+                        <input type="text" id="postal_code" name="postal_code" placeholder="87110" autocomplete="postal-code" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="country">Country <span class="required">*</span></label>
+                        <select id="country" name="country" required>
+                            <option value="US">United States</option>
+                            <option value="CA">Canada</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn" id="addressContinueBtn">Send Verification Code</button>
+                </form>
+                <div class="footer" style="margin-top:12px;">
+                    <p>Signing up as <b>${email}</b>. <a href="/signup">Edit</a></p>
+                </div>`;
+
+            // Show server-derived client IP
+            (async () => {
+                const el = document.getElementById('detectedIp');
+                try {
+                    const r = await fetch('/api/client-ip', { cache: 'no-store' });
+                    const j = await r.json();
+                    if (el) el.textContent = (j && j.ip) ? String(j.ip) : 'Unknown';
+                } catch {
+                    if (el) el.textContent = 'Unknown';
+                }
+            })();
+
+            const addressForm = document.getElementById('addressForm');
+            addressForm.addEventListener('submit', async (ev) => {
+                ev.preventDefault();
+
+                const payload = {
+                    ...(data.original || {}),
+                    address1: document.getElementById('address1').value,
+                    city: document.getElementById('city').value,
+                    state: document.getElementById('state').value,
+                    postal_code: document.getElementById('postal_code').value,
+                    country: document.getElementById('country').value
+                };
+
+                // Basic client-side validation (server will enforce too)
+                if (!payload.address1 || !payload.city || !payload.state || !payload.postal_code || !payload.country) {
+                    showAlert('Please complete your address fields.', 'error');
+                    return;
+                }
+
+                const btn = document.getElementById('addressContinueBtn');
+                btn.disabled = true;
+                const old = btn.textContent;
+                btn.innerHTML = '<span class="loading"></span>Sending code...';
+
+                try {
+                    const response = await fetch('/api/verify-email', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        renderVerifyStep({ token: result.token, email: payload.email, original: payload });
+                    } else {
+                        showAlert(result.message || 'Failed to send verification code.', 'error');
+                    }
+                } catch (e) {
+                    showAlert('Network error. Please check your connection and try again.', 'error');
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = old;
+                }
+            });
+        }
+
+        function renderVerifyStep(data){
+            const c = document.querySelector('.container');
+            c.innerHTML = `
+                <div class="header" style="margin-bottom:12px;">
+                    <h1>Verify your email</h1>
+                    <p>We sent a 6‑digit code to <b>${data.email}</b>. Enter it below to complete your signup.</p>
+                </div>
+                <div id="alert" class="alert"></div>
+                <div class="form-group">
+                    <label for="code">Verification code</label>
+                    <input type="text" id="code" maxlength="6" placeholder="123456" inputmode="numeric" pattern="[0-9]*" />
+                </div>
+                <div class="actions">
+                    <button class="btn" id="verifyBtn">Verify & Create</button>
+                    <button class="btn btn-outline" id="resendBtn">Resend Code</button>
+                </div>
+                <div id="resendMsg" class="resend-msg" role="status" aria-live="polite"></div>`;
+            const format = (sec) => { const m = Math.floor(sec/60); const s = sec % 60; return `${m}:${String(s).padStart(2,'0')}`; };
+            let resendTimerId;
+            const startCooldown = () => {
+                const btn = document.getElementById('resendBtn');
+                const msg = document.getElementById('resendMsg');
+                let remaining = 120;
+                btn.disabled = true;
+                msg.textContent = `Resend available in ${format(remaining)}`;
+                clearInterval(resendTimerId);
+                resendTimerId = setInterval(() => {
+                    remaining--;
+                    if (remaining <= 0) {
+                        clearInterval(resendTimerId);
+                        btn.disabled = false;
+                        msg.textContent = 'You can request a new code now.';
+                    } else {
+                        msg.textContent = `Resend available in ${format(remaining)}`;
+                    }
+                }, 1000);
+            };
+            startCooldown();
+            document.getElementById('verifyBtn').addEventListener('click', async (ev) => {
+                const verifyBtn = ev.currentTarget;
+                const code = document.getElementById('code').value.trim();
+                if (!code) return showAlert('Enter the verification code.', 'error');
+
+                verifyBtn.disabled = true;
+                const oldText = verifyBtn.textContent;
+                verifyBtn.innerHTML = '<span class="loading"></span>Verifying...';
+                try {
+                    const resp = await fetch('/api/complete-signup', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ token: data.token, email: data.email, code })
+                    });
+                    const resj = await resp.json();
+                    if (resj.success) {
+                        renderSuccess({ username: resj.data?.username });
+                    } else {
+                        showAlert(resj.message || 'Invalid code.', 'error');
+                    }
+                } catch (e) {
+                    showAlert('Network error. Please try again.', 'error');
+                } finally {
+                    verifyBtn.disabled = false;
+                    verifyBtn.textContent = oldText;
+                }
+            });
+            document.getElementById('resendBtn').addEventListener('click', async (ev) => {
+                const btn = ev.currentTarget;
+                const msg = document.getElementById('resendMsg');
+                if (btn.disabled) return;
+                const old = btn.textContent; btn.disabled = true; btn.textContent = 'Resending...';
+                try {
+                    const r = await fetch('/api/verify-email', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data.original) });
+                    const j = await r.json();
+                    if (j.success) {
+                        data.token = j.token;
+                        msg.textContent = `Code resent to ${data.email}`;
+                        showAlert('Code resent.', 'success');
+                        btn.textContent = old;
+                        startCooldown();
+                    } else {
+                        msg.textContent = 'Could not resend code. Please try again.';
+                        showAlert('Could not resend code.', 'error');
+                        btn.disabled = false; btn.textContent = old;
+                    }
+                } catch {
+                    msg.textContent = 'Could not resend code. Please try again.';
+                    showAlert('Could not resend code.', 'error');
+                    btn.disabled = false; btn.textContent = old;
+                }
+            });
+        }
+
+        function renderSuccess(data){
+            const c = document.querySelector('.container');
+            c.innerHTML = `
+                <div class="header" style="margin-bottom:12px;">
+                    <h1>Account Created</h1>
+                    <p>Welcome to Phone.System! Your account <b>${data.username || ''}</b> is ready.</p>
+                </div>
+                <div class="success-box">
+                    <div class="details">
+                        <p style="text-align:center;color:#4b5563;">You can now log in to manage your AI agents, numbers, and billing.</p>
+                    </div>
+                    <div class="actions">
+                        <a class="btn" href="/login">Go to Login</a>
+                    </div>
+                </div>`;
+        }
+
+        // Basic client-side validation
+        document.getElementById('email').addEventListener('blur', async function() {
+            const email = this.value.trim();
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            emailHelp.textContent = ''; emailHelp.className = 'help';
+            if (email && !emailRegex.test(email)) {
+                emailHelp.textContent = 'Please enter a valid email address.'; emailHelp.className = 'help help-error';
+                showAlert('Please enter a valid email address.', 'error');
+                return;
+            }
+            if (email) {
+                try {
+                    const r = await fetch(`/api/check-availability?email=${encodeURIComponent(email)}`);
+                    const j = await r.json();
+                    if (j.success && !j.emailAvailable) { emailHelp.textContent = 'Email already exists.'; emailHelp.className = 'help help-error'; showAlert('Email already exists.', 'error'); }
+                    else if (j.success) { emailHelp.textContent = 'Email available'; emailHelp.className = 'help help-ok'; }
+                } catch {}
+            }
+        });
+
+        document.getElementById('username').addEventListener('blur', async function() {
+            const u = this.value.trim();
+            usernameHelp.textContent = ''; usernameHelp.className = 'help';
+            if (u && !/^[A-Za-z0-9]{1,10}$/.test(u)) {
+                usernameHelp.textContent = 'Letters and numbers only, maximum 10 characters.'; usernameHelp.className = 'help help-error';
+                return;
+            }
+            if (u) {
+                try {
+                    const r = await fetch(`/api/check-availability?username=${encodeURIComponent(u)}`);
+                    const j = await r.json();
+                    if (j.success && !j.usernameAvailable) { usernameHelp.textContent = 'Username already exists.'; usernameHelp.className = 'help help-error'; showAlert('Username already exists.', 'error'); }
+                    else if (j.success) { usernameHelp.textContent = 'Username available'; usernameHelp.className = 'help help-ok'; }
+                } catch {}
+            }
+        });
+
+        document.getElementById('password').addEventListener('input', function() {
+            const password = this.value;
+            const alnum = /^[A-Za-z0-9]+$/.test(password);
+            if (password.length > 0 && !alnum) {
+                this.setCustomValidity('Use only letters and numbers (A–Z, a–z, 0–9).');
+            } else if (password.length > 10) {
+                this.setCustomValidity('Password must be maximum 10 characters');
+            } else {
+                this.setCustomValidity('');
+            }
+        });
+    </script>
+    </div>
+
+<!-- Start of LiveChat (www.livechat.com) code -->
+<script>
+    window.__lc = window.__lc || {};
+    window.__lc.license = 18919976;
+    window.__lc.integration_name = "manual_channels";
+    window.__lc.product_name = "livechat";
+    ;(function(n,t,c){function i(n){return e._h?e._h.apply(null,n):e._q.push(n)}var e={_q:[],_h:null,_v:"2.0",on:function(){i(["on",c.call(arguments)])},once:function(){i(["once",c.call(arguments)])},off:function(){i(["off",c.call(arguments)])},get:function(){if(!e._h)throw new Error("[LiveChatWidget] You can't use getters before load.");return i(["get",c.call(arguments)])},call:function(){i(["call",c.call(arguments)])},init:function(){var n=t.createElement("script");n.async=!0,n.type="text/javascript",n.src="https://cdn.livechatinc.com/tracking.js",t.head.appendChild(n)}};!n.__lc.asyncInit&&e.init(),n.LiveChatWidget=n.LiveChatWidget||e}(window,document,[].slice))
+</script>
+<noscript><a href="https://www.livechat.com/chat-with/18919976/" rel="nofollow">Chat with us</a>, powered by <a href="https://www.livechat.com/?welcome" rel="noopener nofollow" target="_blank">LiveChat</a></noscript>
+<!-- End of LiveChat code -->
+
+</body>
+</html>
