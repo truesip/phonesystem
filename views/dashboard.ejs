@@ -8068,6 +8068,8 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
 
     // ========== Billing History ==========
     
+    let billingTotalPages = 1;
+    
     async function loadBillingHistory() {
       const emptyEl = $('#billing-empty');
       const tableEl = $('#billing-table');
@@ -8147,9 +8149,9 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         if (emptyEl) emptyEl.style.display = 'none';
         if (tableEl) tableEl.style.display = 'table';
         if (pagerEl) pagerEl.style.display = 'flex';
-        const totalPages = Math.ceil((j.total || billingData.length) / billingPageSize) || 1;
+        billingTotalPages = Math.ceil((j.total || billingData.length) / billingPageSize) || 1;
         const pageInfoEl = $('#billingPageInfo');
-        if (pageInfoEl) pageInfoEl.textContent = `Page ${billingPage + 1} of ${totalPages}`;
+        if (pageInfoEl) pageInfoEl.textContent = `Page ${billingPage + 1} of ${billingTotalPages}`;
       } catch (e) {
         console.error('[loadBillingHistory]', e);
         if (emptyEl) emptyEl.textContent = 'Failed to load billing history: ' + (e?.message || 'Unknown error');
@@ -8158,7 +8160,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     
     // Billing pagination
     $('#billingPrev').addEventListener('click', () => { if (billingPage > 0) { billingPage--; loadBillingHistory(); } });
-    $('#billingNext').addEventListener('click', () => { billingPage++; loadBillingHistory(); });
+    $('#billingNext').addEventListener('click', () => { if (billingPage < billingTotalPages - 1) { billingPage++; loadBillingHistory(); } });
     
     // Add Fund Modal
     function getSelectedFundMethod(){
