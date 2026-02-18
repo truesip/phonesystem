@@ -13036,7 +13036,7 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
       aiFilters.push('(to_number = ? OR from_number = ?)');
       aiParams.push(didFilter, didFilter);
     }
-    aiFilters.push("status NOT IN ('webhook_received', 'blocked_insufficient_funds', 'blocked_balance_check_failed')");
+    aiFilters.push("status NOT IN ('blocked_insufficient_funds', 'blocked_balance_check_failed')");
     aiFilters.push("direction = 'inbound'");
     const whereAiSql = aiFilters.length ? 'WHERE ' + aiFilters.join(' AND ') : '';
 
@@ -13509,7 +13509,7 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
         `SELECT DATE(time_start) AS d, COUNT(*) AS calls
          FROM ai_call_logs
          WHERE user_id = ? AND DATE(time_start) BETWEEN ? AND ?
-           AND status NOT IN ('webhook_received', 'blocked_insufficient_funds', 'blocked_balance_check_failed')
+           AND status NOT IN ('blocked_insufficient_funds', 'blocked_balance_check_failed')
            AND direction = 'inbound'
          GROUP BY DATE(time_start)
          ORDER BY DATE(time_start)`,
