@@ -86,6 +86,38 @@
     .btn--secondary{width:100%;margin:10px 0 0;padding:12px 16px;background:#f8f9fa;color:var(--text);border:1px solid rgba(0,0,0,.15);border-radius:12px;font-weight:700;cursor:pointer;transition:background .15s ease}
     .btn--secondary:hover{background:#e9ecef}
     .hidden{display:none!important}
+    
+    /* Mobile optimizations */
+    @media (max-width: 768px) {
+      .main-content{padding:40px 16px 30px;}
+      .card{
+        padding:18px 16px;
+        max-width:100%;
+        width:calc(100% - 20px);
+      }
+      h1{font-size:20px;}
+      .card-sub{font-size:12px;}
+      input{font-size:16px;padding:12px;} /* Prevents iOS zoom */
+      .btn{padding:12px 14px;font-size:14px;min-height:48px;}
+      .btn--secondary{padding:12px 14px;font-size:14px;min-height:48px;}
+      .modal{
+        max-width:95%;
+        width:calc(100% - 30px);
+        padding:20px 16px;
+      }
+      .modal h2{font-size:18px;}
+      .modal-sub{font-size:12px;}
+    }
+    
+    @media (max-width: 480px) {
+      .main-content{padding:30px 12px 20px;}
+      .card{padding:16px 14px;width:calc(100% - 16px);}
+      h1{font-size:18px;}
+      input{padding:11px;}
+      .btn{font-size:13px;}
+      .btn--secondary{font-size:13px;}
+      .modal{padding:18px 14px;}
+    }
   </style>
 </head>
 <body>
