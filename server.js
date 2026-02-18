@@ -3770,9 +3770,9 @@ app.post('/api/forgot-password', otpSendLimiter, async (req, res) => {
     
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     
-    // Find user by email from local users table
+    // Find user by email from signup_users table
     const [rows] = await pool.execute(
-      'SELECT id, email, username FROM users WHERE email = ? AND is_active = 1 LIMIT 1',
+      'SELECT id, email, username FROM signup_users WHERE email = ? AND suspended = 0 LIMIT 1',
       [emailTrimmed]
     );
     const user = rows && rows[0];
@@ -3860,11 +3860,11 @@ app.post('/api/reset-password', otpVerifyLimiter, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid code' });
     }
     
-    // Code is valid - update password in local users table
+    // Code is valid - update password in signup_users table
     const passwordHash = await bcrypt.hash(password, 12);
     
     await pool.execute(
-      'UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?',
+      'UPDATE signup_users SET password_hash = ? WHERE id = ?',
       [passwordHash, rec.user_id]
     );
     
@@ -17418,25 +17418,28 @@ async function chargeAiInboundCallLog({ aiCallLogId, userId, amount, description
       return { ok: true, skipped: true, reason: 'zero_amount' };
     }
 
+    // Verify user exists in signup_users
     const [uRows] = await conn.query(
-      'SELECT balance FROM users WHERE id = ? AND is_active = 1 LIMIT 1 FOR UPDATE',
+      'SELECT id, suspended FROM signup_users WHERE id = ? FOR UPDATE',
       [uid]
     );
     const u = uRows && uRows[0] ? uRows[0] : null;
-    if (!u) throw new Error('User not found or inactive');
+    if (!u) throw new Error('User not found');
+    if (u.suspended) throw new Error('User account is suspended');
 
-    const balanceBefore = Number(u.balance || 0);
+    // Calculate balance from billing_history
+    const [balanceRows] = await conn.query(
+      "SELECT COALESCE(SUM(amount), 0) AS balance FROM billing_history WHERE user_id = ? AND status = 'completed'",
+      [uid]
+    );
+    const balanceBefore = parseFloat(balanceRows[0]?.balance || 0);
     const balanceAfter = balanceBefore - amountToCharge;
     const desc = String(description || `AI inbound call – ${row.to_number || row.call_id || callLogId}`)
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 255);
 
-    await conn.query(
-      'UPDATE users SET balance = ?, updated_at = NOW() WHERE id = ?',
-      [balanceAfter, uid]
-    );
-
+    // Insert billing record
     const [ins] = await conn.query(
       `INSERT INTO billing_history
        (user_id, amount, description, transaction_type, payment_method, reference_id,
@@ -17616,25 +17619,28 @@ async function chargeDialerOutboundCallLog({ dialerCallLogId, userId, amount, de
       return { ok: true, skipped: true, reason: 'zero_amount' };
     }
 
+    // Verify user exists in signup_users
     const [uRows] = await conn.query(
-      'SELECT balance FROM users WHERE id = ? AND is_active = 1 LIMIT 1 FOR UPDATE',
+      'SELECT id, suspended FROM signup_users WHERE id = ? FOR UPDATE',
       [uid]
     );
     const u = uRows && uRows[0] ? uRows[0] : null;
-    if (!u) throw new Error('User not found or inactive');
+    if (!u) throw new Error('User not found');
+    if (u.suspended) throw new Error('User account is suspended');
 
-    const balanceBefore = Number(u.balance || 0);
+    // Calculate balance from billing_history
+    const [balanceRows] = await conn.query(
+      "SELECT COALESCE(SUM(amount), 0) AS balance FROM billing_history WHERE user_id = ? AND status = 'completed'",
+      [uid]
+    );
+    const balanceBefore = parseFloat(balanceRows[0]?.balance || 0);
     const balanceAfter = balanceBefore - amountToCharge;
     const desc = String(description || `AI outbound call – ${row.to_number || row.call_id || callLogId}`)
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 255);
 
-    await conn.query(
-      'UPDATE users SET balance = ?, updated_at = NOW() WHERE id = ?',
-      [balanceAfter, uid]
-    );
-
+    // Insert billing record
     const [ins] = await conn.query(
       `INSERT INTO billing_history
        (user_id, amount, description, transaction_type, payment_method, reference_id,
