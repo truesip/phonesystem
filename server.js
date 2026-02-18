@@ -963,15 +963,21 @@ async function getUserById(userId) {
   try {
     if (!pool) throw new Error('Database not configured');
     const [rows] = await pool.query(
-      `SELECT id, username, email, name, phone, balance,
+      `SELECT id, username, email, firstname, lastname, phone,
               address1, city, state, postal_code, country, signup_ip,
-              is_active, created_at
-       FROM users
-       WHERE id = ? AND is_active = 1`,
+              is_admin, suspended, created_at
+       FROM signup_users
+       WHERE id = ?`,
       [userId]
     );
     if (!rows || rows.length === 0) return null;
-    return rows[0];
+    const user = rows[0];
+    // Add name field for backward compatibility
+    if (user.firstname || user.lastname) {
+      user.name = `${user.firstname || ''} ${user.lastname || ''}`.trim();
+    }
+    user.is_active = user.suspended ? 0 : 1;
+    return user;
   } catch (err) {
     console.error('[getUserById] Error:', err);
     return null;
@@ -982,14 +988,20 @@ async function getUserByUsernameOrEmail(identifier) {
   try {
     if (!pool) throw new Error('Database not configured');
     const [rows] = await pool.query(
-      `SELECT id, username, email, password_hash, name, is_active
-       FROM users
-       WHERE (username = ? OR email = ?) AND is_active = 1
+      `SELECT id, username, email, password_hash, firstname, lastname, is_admin, suspended
+       FROM signup_users
+       WHERE (username = ? OR email = ?) AND suspended = 0
        LIMIT 1`,
       [identifier, identifier]
     );
     if (!rows || rows.length === 0) return null;
-    return rows[0];
+    const user = rows[0];
+    // Add name and is_active fields for backward compatibility
+    if (user.firstname || user.lastname) {
+      user.name = `${user.firstname || ''} ${user.lastname || ''}`.trim();
+    }
+    user.is_active = user.suspended ? 0 : 1;
+    return user;
   } catch (err) {
     console.error('[getUserByUsernameOrEmail] Error:', err);
     return null;
@@ -1000,7 +1012,7 @@ async function userExists(username, email) {
   try {
     if (!pool) throw new Error('Database not configured');
     const [rows] = await pool.query(
-      'SELECT id FROM users WHERE username = ? OR email = ? LIMIT 1',
+      'SELECT id FROM signup_users WHERE username = ? OR email = ? LIMIT 1',
       [username, email]
     );
     return rows && rows.length > 0;
@@ -1018,17 +1030,28 @@ async function createUser(userData) {
       balance = 0.00, signupIp = null,
       address1 = null, city = null, state = null, postalCode = null, country = null
     } = userData;
+    
+    // Parse firstname and lastname from name field if needed
+    let firstname = null;
+    let lastname = null;
+    if (name && typeof name === 'string') {
+      const parts = name.trim().split(/\s+/);
+      if (parts.length > 0) firstname = parts[0];
+      if (parts.length > 1) lastname = parts.slice(1).join(' ');
+    }
+    
+    // Insert into signup_users table (used by admin panel)
     const [result] = await pool.query(
-      `INSERT INTO users
-       (username, email, password_hash, name, phone, balance, signup_ip,
+      `INSERT INTO signup_users
+       (username, email, password_hash, firstname, lastname, phone, signup_ip,
         address1, city, state, postal_code, country, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [username, email, passwordHash, name, phone, balance, signupIp,
+      [username, email, passwordHash, firstname, lastname, phone, signupIp,
        address1, city, state, postalCode, country]
     );
     const userId = result.insertId;
     if (DEBUG) {
-      console.log('[createUser] User created:', { userId, username, email, balance });
+      console.log('[createUser] User created:', { userId, username, email, firstname, lastname });
     }
     return { success: true, userId };
   } catch (err) {
@@ -3069,11 +3092,11 @@ async function checkAvailability({ username, email }) {
   if (!pool) return { usernameAvailable: true, emailAvailable: true };
   let usernameAvailable = true, emailAvailable = true;
   if (username) {
-    const [r] = await pool.execute('SELECT 1 FROM users WHERE username=? LIMIT 1', [username]);
+    const [r] = await pool.execute('SELECT 1 FROM signup_users WHERE username=? LIMIT 1', [username]);
     usernameAvailable = r.length === 0;
   }
   if (email) {
-    const [r2] = await pool.execute('SELECT 1 FROM users WHERE email=? LIMIT 1', [email]);
+    const [r2] = await pool.execute('SELECT 1 FROM signup_users WHERE email=? LIMIT 1', [email]);
     emailAvailable = r2.length === 0;
   }
   return { usernameAvailable, emailAvailable };
