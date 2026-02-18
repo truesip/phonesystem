@@ -13037,7 +13037,6 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
       aiParams.push(didFilter, didFilter);
     }
     aiFilters.push("status NOT IN ('webhook_received', 'blocked_insufficient_funds', 'blocked_balance_check_failed')");
-    aiFilters.push('time_connect IS NOT NULL');
     const whereAiSql = aiFilters.length ? 'WHERE ' + aiFilters.join(' AND ') : '';
 
     const [aiRows] = await pool.query(
@@ -13510,7 +13509,6 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
          FROM ai_call_logs
          WHERE user_id = ? AND DATE(time_start) BETWEEN ? AND ?
            AND status NOT IN ('webhook_received', 'blocked_insufficient_funds', 'blocked_balance_check_failed')
-           AND time_connect IS NOT NULL
          GROUP BY DATE(time_start)
          ORDER BY DATE(time_start)`,
         [userId, from, to]
