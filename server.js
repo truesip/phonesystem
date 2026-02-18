@@ -1138,9 +1138,14 @@ async function initDb() {
     password: decodeURIComponent(u.password),
     database: dbName,
     ssl: sslOptions,
-    connectionLimit: 50,
+    connectionLimit: 200, // Increased from 50 for scalability (1M users)
     waitForConnections: true,
-    queueLimit: 0
+    queueLimit: 0,
+    connectTimeout: 10000, // 10 seconds
+    acquireTimeout: 10000, // 10 seconds to acquire connection
+    timeout: 60000, // 60 seconds query timeout
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0
   });
   
   // Initialize MySQL session store
@@ -18759,6 +18764,63 @@ function startBillingScheduler() {
       runMarkupBillingTick();
     }, intervalMs);
 }
+
+// Health check endpoint for load balancers
+app.get('/health', async (req, res) => {
+  try {
+    // Basic health check - just return OK if app is running
+    res.status(200).json({ status: 'ok', timestamp: Date.now() });
+  } catch (e) {
+    res.status(500).json({ status: 'error', message: e.message });
+  }
+});
+
+// Readiness check - verify database connection
+app.get('/ready', async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(503).json({ status: 'not ready', reason: 'Database pool not initialized' });
+    }
+    // Quick database ping
+    await pool.query('SELECT 1');
+    res.status(200).json({ 
+      status: 'ready', 
+      timestamp: Date.now(),
+      database: 'connected'
+    });
+  } catch (e) {
+    res.status(503).json({ 
+      status: 'not ready', 
+      reason: e.message,
+      database: 'disconnected'
+    });
+  }
+});
+
+// Metrics endpoint for monitoring
+app.get('/metrics', async (req, res) => {
+  try {
+    const metrics = {
+      timestamp: Date.now(),
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+      cpu: process.cpuUsage(),
+    };
+    
+    if (pool) {
+      // Get connection pool stats if available
+      metrics.database = {
+        connectionLimit: pool.pool.config.connectionLimit,
+        // Note: mysql2 doesn't expose active connections easily
+        // Consider adding a monitoring library for detailed metrics
+      };
+    }
+    
+    res.status(200).json(metrics);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Start server after DB + session store are initialized
 async function startServer() {
