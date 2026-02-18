@@ -13036,6 +13036,8 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
       aiFilters.push('(to_number = ? OR from_number = ?)');
       aiParams.push(didFilter, didFilter);
     }
+    aiFilters.push("status NOT IN ('webhook_received', 'blocked_insufficient_funds', 'blocked_balance_check_failed')");
+    aiFilters.push('time_connect IS NOT NULL');
     const whereAiSql = aiFilters.length ? 'WHERE ' + aiFilters.join(' AND ') : '';
 
     const [aiRows] = await pool.query(
@@ -13043,8 +13045,6 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
               time_start, time_connect, time_end, duration, billsec, price, status, created_at
        FROM ai_call_logs
        ${whereAiSql}
-         AND status NOT IN ('webhook_received', 'blocked_insufficient_funds', 'blocked_balance_check_failed')
-         AND time_connect IS NOT NULL
        ORDER BY time_start DESC, id DESC`,
       aiParams
     );
