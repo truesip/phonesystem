@@ -13043,6 +13043,8 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
               time_start, time_connect, time_end, duration, billsec, price, status, created_at
        FROM ai_call_logs
        ${whereAiSql}
+         AND status NOT IN ('webhook_received', 'blocked_insufficient_funds', 'blocked_balance_check_failed')
+         AND time_connect IS NOT NULL
        ORDER BY time_start DESC, id DESC`,
       aiParams
     );
@@ -13507,6 +13509,8 @@ app.get('/api/me/stats', requireAuth, async (req, res) => {
         `SELECT DATE(time_start) AS d, COUNT(*) AS calls
          FROM ai_call_logs
          WHERE user_id = ? AND DATE(time_start) BETWEEN ? AND ?
+           AND status NOT IN ('webhook_received', 'blocked_insufficient_funds', 'blocked_balance_check_failed')
+           AND time_connect IS NOT NULL
          GROUP BY DATE(time_start)
          ORDER BY DATE(time_start)`,
         [userId, from, to]
