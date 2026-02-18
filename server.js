@@ -11008,6 +11008,14 @@ app.get('/api/me/ai/agents', requireAuth, async (req, res) => {
        ORDER BY a.created_at DESC`,
       [userId]
     );
+    
+    // Debug: log inbound transfer data for each agent
+    if (DEBUG) {
+      rows.forEach(r => {
+        console.log(`[ai.agents.list] Agent ${r.id}: inbound_transfer_enabled=${r.inbound_transfer_enabled}, inbound_transfer_number=${r.inbound_transfer_number}`);
+      });
+    }
+    
     return res.json({ success: true, data: rows || [] });
   } catch (e) {
     if (DEBUG) console.error('[ai.agents.list] error:', e.message || e);
