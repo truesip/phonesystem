@@ -11008,14 +11008,6 @@ app.get('/api/me/ai/agents', requireAuth, async (req, res) => {
        ORDER BY a.created_at DESC`,
       [userId]
     );
-    
-    // Debug: log inbound transfer data for each agent
-    if (DEBUG) {
-      rows.forEach(r => {
-        console.log(`[ai.agents.list] Agent ${r.id}: inbound_transfer_enabled=${r.inbound_transfer_enabled}, inbound_transfer_number=${r.inbound_transfer_number}`);
-      });
-    }
-    
     return res.json({ success: true, data: rows || [] });
   } catch (e) {
     if (DEBUG) console.error('[ai.agents.list] error:', e.message || e);
@@ -12112,8 +12104,6 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
     }
 
     // Optional: inbound direct transfer settings
-    if (DEBUG) console.log('[ai.agents.update] Inbound transfer received:', { inbound_transfer_enabled, inbound_transfer_number });
-    
     const inboundTransferEnabledRaw = (inbound_transfer_enabled !== undefined) ? inbound_transfer_enabled : inboundTransferEnabled;
     let nextInboundTransferEnabled = agent.inbound_transfer_enabled != null ? Number(agent.inbound_transfer_enabled) : 0;
     if (inboundTransferEnabledRaw !== undefined) {
@@ -12135,8 +12125,6 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
       }
       nextInboundTransferNumber = norm;
     }
-    
-    if (DEBUG) console.log('[ai.agents.update] Inbound transfer after normalization:', { nextInboundTransferEnabled, nextInboundTransferNumber });
 
     // If inbound transfer is enabled, require a number
     if (nextInboundTransferEnabled && !nextInboundTransferNumber) {
