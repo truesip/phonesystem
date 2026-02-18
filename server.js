@@ -1138,12 +1138,10 @@ async function initDb() {
     password: decodeURIComponent(u.password),
     database: dbName,
     ssl: sslOptions,
-    connectionLimit: 200, // Increased from 50 for scalability (1M users)
+    connectionLimit: 200, // Increased from 50 for scalability (50k-100k concurrent users)
     waitForConnections: true,
     queueLimit: 0,
-    connectTimeout: 10000, // 10 seconds
-    acquireTimeout: 10000, // 10 seconds to acquire connection
-    timeout: 60000, // 60 seconds query timeout
+    connectTimeout: 10000, // 10 seconds - supported by mysql2
     enableKeepAlive: true,
     keepAliveInitialDelay: 0
   });
