@@ -6365,6 +6365,10 @@
       // Inbound direct transfer settings
       const inboundTransferEnabled = agent ? Boolean(agent.inbound_transfer_enabled) : false;
       const inboundTransferNumber = agent ? String(agent.inbound_transfer_number || '') : '';
+      
+      // Debug logging
+      console.log('[Dashboard] Loading agent inbound transfer:', { agentId: agent?.id, inboundTransferEnabled, inboundTransferNumber });
+      
       try {
         $('#aiAgentInboundTransferEnabled').checked = inboundTransferEnabled;
         $('#aiAgentInboundTransferNumber').value = inboundTransferNumber;
@@ -6740,6 +6744,9 @@ Guidelines:
       const transfer_to_number = ($('#aiAgentTransferNumber').value || '').trim();
       const inbound_transfer_enabled = $('#aiAgentInboundTransferEnabled').checked;
       const inbound_transfer_number = ($('#aiAgentInboundTransferNumber').value || '').trim();
+      
+      // Debug logging
+      console.log('[Dashboard] Saving agent with inbound transfer:', { inbound_transfer_enabled, inbound_transfer_number });
 
       const background_audio_url = ($('#aiAgentBackgroundAudioUrl').value || '').trim();
       const bgGainRaw = ($('#aiAgentBackgroundAudioGain').value || '').trim();

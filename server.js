@@ -12104,6 +12104,8 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
     }
 
     // Optional: inbound direct transfer settings
+    if (DEBUG) console.log('[ai.agents.update] Inbound transfer received:', { inbound_transfer_enabled, inbound_transfer_number });
+    
     const inboundTransferEnabledRaw = (inbound_transfer_enabled !== undefined) ? inbound_transfer_enabled : inboundTransferEnabled;
     let nextInboundTransferEnabled = agent.inbound_transfer_enabled != null ? Number(agent.inbound_transfer_enabled) : 0;
     if (inboundTransferEnabledRaw !== undefined) {
@@ -12125,6 +12127,8 @@ app.patch('/api/me/ai/agents/:id', requireAuth, async (req, res) => {
       }
       nextInboundTransferNumber = norm;
     }
+    
+    if (DEBUG) console.log('[ai.agents.update] Inbound transfer after normalization:', { nextInboundTransferEnabled, nextInboundTransferNumber });
 
     // If inbound transfer is enabled, require a number
     if (nextInboundTransferEnabled && !nextInboundTransferNumber) {
