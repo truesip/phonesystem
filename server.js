@@ -12971,7 +12971,7 @@ app.get('/api/me/billing-history', requireAuth, async (req, res) => {
 // Shared helper to build a unified CDR timeline (inbound from user_did_cdrs + outbound
 // from user_mb_cdrs) with sorting and pagination. Used by both /api/me/cdrs and
 // /api/me/cdrs/local so they stay in sync.
-async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, didFilter }) {
+async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, didFilter, directionFilter }) {
   if (!pool) throw new Error('Database not configured');
   if (!userId) throw new Error('Missing userId');
 
@@ -13198,6 +13198,11 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
 
   let all = inbound.concat(aiInbound).concat(localCdrs).concat(dialerOutbound).concat(outbound);
 
+  // Filter by direction if specified
+  if (directionFilter && (directionFilter === 'inbound' || directionFilter === 'outbound')) {
+    all = all.filter(c => String(c.direction || '').toLowerCase() === directionFilter.toLowerCase());
+  }
+
   // Sort newest first by timeStart (fallback to createdAt)
   all.sort((a, b) => {
     const aTs = a.timeStart ? Date.parse(a.timeStart) : (a.createdAt ? Date.parse(a.createdAt) : 0);
@@ -13229,6 +13234,7 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
     const fromRaw = (req.query.from || '').toString().trim();
     const toRaw = (req.query.to || '').toString().trim();
     const didFilter = (req.query.did || '').toString().trim();
+    const directionFilter = (req.query.direction || '').toString().trim();
 
     const { rows, total } = await loadUserCdrTimeline({
       userId,
@@ -13236,7 +13242,8 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
       pageSize,
       fromRaw,
       toRaw,
-      didFilter
+      didFilter,
+      directionFilter
     });
 
     return res.json({ success: true, data: rows, total, page, pageSize });

@@ -7662,6 +7662,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       q.set('pageSize', String(cdrPageSize));
       if (from) q.set('from', from);
       if (to) q.set('to', to);
+      if (filter && filter !== 'all') q.set('direction', filter);
 
       try{
         let j;
@@ -7697,11 +7698,8 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         const tbody = $('#cdr-table tbody');
         tbody.innerHTML='';
 
-        // Apply inbound/outbound filter using direction from backend
-        if (filter !== 'all') {
-          const want = filter === 'inbound' ? 'inbound' : 'outbound';
-          rows = rows.filter(c => String(c.direction || '').toLowerCase() === want);
-        }
+        // Server-side filtering is now applied via ?direction query param
+        // No need for client-side filtering
 
         if (!rows.length) {
           $('#cdr-empty').textContent = filter === 'all'
