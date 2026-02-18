@@ -3902,13 +3902,13 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
       }
     };
 
-    // User stats from local users table
+    // User stats from signup_users table
     const [userStatsRows] = await safeQuery(`
       SELECT 
         COUNT(*) as total,
         SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) as newThisMonth,
-        SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END) as suspended
-      FROM users
+        SUM(CASE WHEN suspended = 1 THEN 1 ELSE 0 END) as suspended
+      FROM signup_users
     `, [], { total: 0, newThisMonth: 0, suspended: 0 });
     const userStats = userStatsRows || { total: 0, newThisMonth: 0, suspended: 0 };
 
