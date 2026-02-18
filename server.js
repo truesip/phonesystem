@@ -82,7 +82,7 @@ const AI_CALLER_MEMORY_MAX_CHARS_PER_MESSAGE = Math.max(
 const AI_CALLER_MEMORY_MAX_DAYS = Math.max(1, parseInt(process.env.AI_CALLER_MEMORY_MAX_DAYS || '30', 10) || 30);
 // Outbound dialer settings
 const DIALER_MIN_CONCURRENCY = 1;
-const DIALER_MAX_CONCURRENCY = 20;
+const DIALER_MAX_CONCURRENCY = 50;
 const DIALER_MAX_LEADS_PER_UPLOAD = Math.max(1, parseInt(process.env.DIALER_MAX_LEADS_PER_UPLOAD || '5000', 10) || 5000);
 const DIALER_CAMPAIGN_STATUSES = ['draft', 'running', 'paused', 'completed', 'deleted'];
 const DIALER_LEAD_STATUSES = ['pending', 'queued', 'dialing', 'answered', 'voicemail', 'transferred', 'failed', 'completed'];
