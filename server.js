@@ -842,12 +842,14 @@ const otpVerifyLimiter = rateLimit({
 async function getUserBalance(userId) {
   try {
     if (!pool) throw new Error('Database not configured');
-    const [rows] = await pool.query(
-      'SELECT balance FROM users WHERE id = ? AND is_active = 1',
+    
+    // Calculate balance directly from billing_history with indexed query
+    // The idx_user_created index on (user_id, created_at) helps with this query
+    const [balanceRows] = await pool.query(
+      "SELECT COALESCE(SUM(amount), 0) AS balance FROM billing_history WHERE user_id = ? AND status = 'completed'",
       [userId]
     );
-    if (!rows || rows.length === 0) return null;
-    return parseFloat(rows[0].balance || 0);
+    return parseFloat(balanceRows[0]?.balance || 0);
   } catch (err) {
     console.error('[getUserBalance] Error:', err);
     return null;
@@ -859,20 +861,29 @@ async function updateUserBalance(userId, amount, description, transactionType = 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+    
+    // Check user exists in signup_users
     const [userRows] = await conn.query(
-      'SELECT balance FROM users WHERE id = ? AND is_active = 1 FOR UPDATE',
+      'SELECT id, suspended FROM signup_users WHERE id = ? FOR UPDATE',
       [userId]
     );
     if (!userRows || userRows.length === 0) {
-      throw new Error('User not found or inactive');
+      throw new Error('User not found');
     }
-    const balanceBefore = parseFloat(userRows[0].balance || 0);
-    const balanceAfter = balanceBefore + amount;
-    const [ins] = await conn.query(
-      'UPDATE users SET balance = ?, updated_at = NOW() WHERE id = ?',
-      [balanceAfter, userId]
+    if (userRows[0].suspended) {
+      throw new Error('User account is suspended');
+    }
+    
+    // Calculate current balance from billing_history
+    const [balanceRows] = await conn.query(
+      'SELECT COALESCE(SUM(amount), 0) AS balance FROM billing_history WHERE user_id = ? AND status = \'completed\'',
+      [userId]
     );
-    await conn.query(
+    const balanceBefore = parseFloat(balanceRows[0]?.balance || 0);
+    const balanceAfter = balanceBefore + amount;
+    
+    // Insert billing record
+    const [ins] = await conn.query(
       `INSERT INTO billing_history
        (user_id, amount, description, transaction_type, payment_method, reference_id,
         balance_before, balance_after, status, created_at)
@@ -881,6 +892,7 @@ async function updateUserBalance(userId, amount, description, transactionType = 
        balanceBefore, balanceAfter]
     );
     const billingId = ins && ins.insertId ? Number(ins.insertId) : null;
+    
     await conn.commit();
     if (DEBUG) {
       console.log('[updateUserBalance]', {
@@ -1063,10 +1075,19 @@ async function createUser(userData) {
 async function updateUserProfile(userId, updates) {
   try {
     if (!pool) throw new Error('Database not configured');
-    const allowedFields = ['name', 'phone', 'address1', 'city', 'state', 'postal_code', 'country'];
+    // Map 'name' to firstname/lastname if provided
+    let processedUpdates = { ...updates };
+    if (processedUpdates.name && typeof processedUpdates.name === 'string') {
+      const parts = processedUpdates.name.trim().split(/\s+/);
+      if (parts.length > 0) processedUpdates.firstname = parts[0];
+      if (parts.length > 1) processedUpdates.lastname = parts.slice(1).join(' ');
+      delete processedUpdates.name;
+    }
+    
+    const allowedFields = ['firstname', 'lastname', 'phone', 'address1', 'city', 'state', 'postal_code', 'country'];
     const fields = [];
     const values = [];
-    for (const [key, value] of Object.entries(updates)) {
+    for (const [key, value] of Object.entries(processedUpdates)) {
       if (allowedFields.includes(key) && value !== undefined) {
         fields.push(`${key} = ?`);
         values.push(value);
@@ -1077,7 +1098,7 @@ async function updateUserProfile(userId, updates) {
     }
     values.push(userId);
     await pool.query(
-      `UPDATE users SET ${fields.join(', ')}, updated_at = NOW() WHERE id = ?`,
+      `UPDATE signup_users SET ${fields.join(', ')} WHERE id = ?`,
       values
     );
     if (DEBUG) {
@@ -1543,11 +1564,39 @@ async function initDb() {
     user_id BIGINT NOT NULL,
     amount DECIMAL(18,8) NOT NULL,
     description VARCHAR(255) NULL,
+    transaction_type VARCHAR(32) NULL,
+    payment_method VARCHAR(64) NULL,
+    reference_id VARCHAR(255) NULL,
+    balance_before DECIMAL(18,8) NULL,
+    balance_after DECIMAL(18,8) NULL,
     status ENUM('pending', 'completed', 'failed') NOT NULL DEFAULT 'completed',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY idx_billing_user_id (user_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
+  
+  // Ensure billing_history has all required columns for balance tracking
+  for (const colDef of [
+    { name: 'transaction_type', ddl: "ALTER TABLE billing_history ADD COLUMN transaction_type VARCHAR(32) NULL AFTER description" },
+    { name: 'payment_method', ddl: "ALTER TABLE billing_history ADD COLUMN payment_method VARCHAR(64) NULL AFTER transaction_type" },
+    { name: 'reference_id', ddl: "ALTER TABLE billing_history ADD COLUMN reference_id VARCHAR(255) NULL AFTER payment_method" },
+    { name: 'balance_before', ddl: "ALTER TABLE billing_history ADD COLUMN balance_before DECIMAL(18,8) NULL AFTER reference_id" },
+    { name: 'balance_after', ddl: "ALTER TABLE billing_history ADD COLUMN balance_after DECIMAL(18,8) NULL AFTER balance_before" }
+  ]) {
+    try {
+      const [hasCol] = await pool.query(
+        'SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=\'billing_history\' AND column_name=? LIMIT 1',
+        [dbName, colDef.name]
+      );
+      if (!hasCol || !hasCol.length) {
+        await pool.query(colDef.ddl);
+        if (DEBUG) console.log('[schema] Added billing_history column:', colDef.name);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] billing_history column check failed:', colDef.name, e.message || e);
+    }
+  }
+  
   // Pending orders table - tracks DID orders that have not completed yet
   await pool.query(`CREATE TABLE IF NOT EXISTS pending_orders (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -3009,6 +3058,20 @@ async function initDb() {
     } catch (e) {
       if (DEBUG) console.warn('[schema] billing_history idx_user_created check failed', e.message || e);
     }
+    
+    // Add optimized index for balance calculation queries (user_id + status)
+    try {
+      const [hasBalanceIdx] = await pool.query(
+        "SELECT 1 FROM information_schema.statistics WHERE table_schema=? AND table_name='billing_history' AND index_name='idx_user_status' LIMIT 1",
+        [dbName]
+      );
+      if (!hasBalanceIdx || !hasBalanceIdx.length) {
+        await pool.query('ALTER TABLE billing_history ADD INDEX idx_user_status (user_id, status)');
+        if (DEBUG) console.log('[schema] Added billing_history.idx_user_status index for balance queries');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] billing_history idx_user_status check failed', e.message || e);
+    }
   } catch (e) { if (DEBUG) console.warn('Schema check failed', e.message || e); }
 }
 async function storeVerification({ token, codeHash, email, expiresAt, fields }) {
@@ -4453,7 +4516,7 @@ app.get('/api/admin/users-balances', async (req, res) => {
     const page = Math.max(0, parseInt(req.query.page || '0', 10));
     const start = page * limit;
     const q = (req.query.q || '').toString().trim();
-    let query = 'SELECT id, username, balance AS credit FROM signup_users';
+    let query = 'SELECT id, username FROM signup_users';
     const params = [];
     if (q) {
       query += ' WHERE username LIKE ? OR email LIKE ?';
@@ -4461,7 +4524,18 @@ app.get('/api/admin/users-balances', async (req, res) => {
     }
     query += ` ORDER BY id DESC LIMIT ${limit} OFFSET ${start}`;
     const [raw] = await pool.execute(query, params);
-    const rows = (raw || []).map(r => ({ id: r.id, username: r.username || '', credit: Number(r.credit ?? 0) }));
+    
+    // Fetch balance for each user from billing_history
+    const rows = [];
+    for (const r of raw || []) {
+      let credit = 0;
+      try {
+        const bal = await getUserBalance(r.id);
+        if (Number.isFinite(bal)) credit = bal;
+      } catch {}
+      rows.push({ id: r.id, username: r.username || '', credit: Number(credit) });
+    }
+    
     return res.json({ success: true, rows, page, limit });
   } catch (e) {
     console.error('users-balances api error', e.message || e);
@@ -4482,8 +4556,14 @@ app.get('/api/me/profile', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
     
-    // Get balance from local database
-    let balance = user.balance || 0;
+    // Get balance from billing_history
+    let balance = 0;
+    try {
+      const bal = await getUserBalance(userId);
+      if (Number.isFinite(bal)) balance = bal;
+    } catch (e) {
+      if (DEBUG) console.warn('[profile] Balance fetch failed:', e.message || e);
+    }
     
     // Cache balance in session
     try {
@@ -4561,7 +4641,7 @@ app.put('/api/me/profile/address', requireAuth, async (req, res) => {
     if (postalCode.length > 32) return res.status(400).json({ success: false, message: 'ZIP/Postal Code is too long' });
 
     await pool.execute(
-      'UPDATE users SET address1 = ?, city = ?, state = ?, postal_code = ?, country = ?, updated_at = NOW() WHERE id = ? LIMIT 1',
+      'UPDATE signup_users SET address1 = ?, city = ?, state = ?, postal_code = ?, country = ? WHERE id = ? LIMIT 1',
       [
         address1 ? address1 : null,
         city ? city : null,
