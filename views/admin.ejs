@@ -475,18 +475,9 @@ async function loadStats() {
     const html = `
       <div class="kpi-grid">
         <div class="kpi-card">
-          <div class="kpi-value">${num(t.dids.active)}</div>
-          <div class="kpi-label">Active DIDs</div>
-          <div class="kpi-sub">${num(t.dids.total)} total</div>
-        </div>
-        <div class="kpi-card">
           <div class="kpi-value">${num(t.aiNumbers.active)}</div>
           <div class="kpi-label">AI Numbers</div>
           <div class="kpi-sub">${num(t.aiNumbers.total)} total</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-value">${num(t.trunks)}</div>
-          <div class="kpi-label">Trunks</div>
         </div>
         <div class="kpi-card success">
           <div class="kpi-value">${num(t.calls.total)}</div>
@@ -503,9 +494,7 @@ async function loadStats() {
         </div>
         <div class="stats-box">
           <h4>Number Inventory</h4>
-          <div class="stat-row"><span class="stat-label">DIDs</span><span class="stat-value">${num(t.dids.active)} active</span></div>
           <div class="stat-row"><span class="stat-label">AI Phone Numbers</span><span class="stat-value">${num(t.aiNumbers.active)} active</span></div>
-          <div class="stat-row"><span class="stat-label">Call Forwarding Trunks</span><span class="stat-value">${num(t.trunks)}</span></div>
         </div>
       </div>
     `;

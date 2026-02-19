@@ -4035,7 +4035,7 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     const [trunkStatsRows] = await safeQuery(`SELECT COUNT(*) as total FROM user_trunks`, [], { total: 0 });
     const trunkStats = trunkStatsRows || { total: 0 };
     
-    // Call stats (AI calls)
+    // Call stats (AI calls + dialer calls)
     const [aiCallStatsRows] = await safeQuery(`
       SELECT 
         COUNT(*) as totalCalls,
@@ -4046,6 +4046,18 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
       FROM ai_call_logs
     `, [], { totalCalls: 0, inboundCalls: 0, outboundCalls: 0, totalSeconds: 0, totalRevenue: 0 });
     const aiCallStats = aiCallStatsRows || { totalCalls: 0, inboundCalls: 0, outboundCalls: 0, totalSeconds: 0, totalRevenue: 0 };
+
+    // Add dialer outbound calls to outbound count
+    const [dialerCallStatsRows] = await safeQuery(`
+      SELECT COUNT(*) as totalCalls
+      FROM dialer_call_logs
+      WHERE status IS NULL OR status <> 'queued'
+    `, [], { totalCalls: 0 });
+    const dialerCallStats = dialerCallStatsRows || { totalCalls: 0 };
+    
+    // Merge dialer calls into outbound count
+    aiCallStats.outboundCalls = Number(aiCallStats.outboundCalls) + Number(dialerCallStats.totalCalls);
+    aiCallStats.totalCalls = Number(aiCallStats.totalCalls) + Number(dialerCallStats.totalCalls);
 
     // AI Platform stats
     const [agentStatsRows] = await safeQuery(`SELECT COUNT(*) as total FROM ai_agents`, [], { total: 0 });
