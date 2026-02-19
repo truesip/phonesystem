@@ -71,7 +71,7 @@ services:
       - key: PIPECAT_MIN_AGENTS
         value: "0"
       - key: PIPECAT_MAX_AGENTS
-        value: "50"
+        value: "10"
       - key: PIPECAT_ENABLE_KRISP
         value: "1"
       - key: PIPECAT_DIALIN_WEBHOOK_BASE
