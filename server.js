@@ -4047,17 +4047,22 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     `, [], { totalCalls: 0, inboundCalls: 0, outboundCalls: 0, totalSeconds: 0, totalRevenue: 0 });
     const aiCallStats = aiCallStatsRows || { totalCalls: 0, inboundCalls: 0, outboundCalls: 0, totalSeconds: 0, totalRevenue: 0 };
 
-    // Add dialer outbound calls to outbound count
+    // Add dialer outbound calls to outbound count (including duration and revenue)
     const [dialerCallStatsRows] = await safeQuery(`
-      SELECT COUNT(*) as totalCalls
+      SELECT 
+        COUNT(*) as totalCalls,
+        COALESCE(SUM(duration_sec), 0) as totalSeconds,
+        COALESCE(SUM(price), 0) as totalRevenue
       FROM dialer_call_logs
       WHERE status IS NULL OR status <> 'queued'
-    `, [], { totalCalls: 0 });
-    const dialerCallStats = dialerCallStatsRows || { totalCalls: 0 };
+    `, [], { totalCalls: 0, totalSeconds: 0, totalRevenue: 0 });
+    const dialerCallStats = dialerCallStatsRows || { totalCalls: 0, totalSeconds: 0, totalRevenue: 0 };
     
-    // Merge dialer calls into outbound count
+    // Merge dialer calls into outbound count, duration, and revenue
     aiCallStats.outboundCalls = Number(aiCallStats.outboundCalls) + Number(dialerCallStats.totalCalls);
     aiCallStats.totalCalls = Number(aiCallStats.totalCalls) + Number(dialerCallStats.totalCalls);
+    aiCallStats.totalSeconds = Number(aiCallStats.totalSeconds) + Number(dialerCallStats.totalSeconds);
+    aiCallStats.totalRevenue = Number(aiCallStats.totalRevenue) + Number(dialerCallStats.totalRevenue);
 
     // AI Platform stats
     const [agentStatsRows] = await safeQuery(`SELECT COUNT(*) as total FROM ai_agents`, [], { total: 0 });
