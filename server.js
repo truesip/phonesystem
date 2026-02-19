@@ -9460,8 +9460,8 @@ async function runDialerWorkerTick() {
 
         await startDialerLeadCall({ campaign: c, lead });
         
-        // Small delay to avoid bursting Pipecat API with simultaneous requests
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // 1 second delay = max 1 call per second to prevent Pipecat API rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
   } catch (e) {
