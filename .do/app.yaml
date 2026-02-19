@@ -67,7 +67,7 @@ services:
       - key: PIPECAT_REGION
         value: us-west
       - key: PIPECAT_AGENT_PROFILE
-        value: agent-2x
+        value: agent-1x
       - key: PIPECAT_MIN_AGENTS
         value: "0"
       - key: PIPECAT_MAX_AGENTS
