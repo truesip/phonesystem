@@ -577,7 +577,6 @@ function renderUserTable() {
             <th>Username</th>
             <th>Email</th>
             <th>Status</th>
-            <th>DIDs</th>
             <th>AI#</th>
             <th>Agents</th>
             <th>Created</th>
@@ -598,7 +597,6 @@ function renderUserTable() {
           <td><strong>${escapeHtml(u.username)}</strong></td>
           <td>${escapeHtml(u.email)}</td>
           <td>${statusHtml}</td>
-          <td>${u.dids || 0}</td>
           <td>${u.aiNumbers || 0}</td>
           <td>${u.agents || 0}</td>
           <td>${created}</td>
@@ -667,7 +665,6 @@ async function viewUser(id) {
       
       <div class="detail-section">
         <h4>Resources</h4>
-        <div class="detail-row"><span class="detail-label">DIDs:</span><span class="detail-value">${data.dids.length}</span></div>
         <div class="detail-row"><span class="detail-label">AI Numbers:</span><span class="detail-value">${data.aiNumbers.length}</span></div>
         <div class="detail-row"><span class="detail-label">AI Agents:</span><span class="detail-value">${data.agents.length}</span></div>
       </div>
