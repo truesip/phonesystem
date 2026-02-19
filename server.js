@@ -4255,11 +4255,23 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
       );
       const agentMap = Object.fromEntries(agentCounts.map(r => [r.user_id, r.count]));
       
-      // Attach counts to users
+      // Get user balances
+      const balanceMap = {};
+      for (const userId of userIds) {
+        try {
+          const balance = await getUserBalance(userId);
+          balanceMap[userId] = balance != null ? Number(balance) : null;
+        } catch (e) {
+          balanceMap[userId] = null;
+        }
+      }
+      
+      // Attach counts and balance to users
       for (const u of users) {
         u.dids = didMap[u.id] || 0;
         u.aiNumbers = aiNumMap[u.id] || 0;
         u.agents = agentMap[u.id] || 0;
+        u.balance = balanceMap[u.id];
       }
     }
     

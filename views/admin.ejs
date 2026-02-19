@@ -585,6 +585,7 @@ function renderUserTable() {
             <th>Username</th>
             <th>Email</th>
             <th>Status</th>
+            <th>Balance</th>
             <th>AI#</th>
             <th>Agents</th>
             <th>Created</th>
@@ -599,12 +600,14 @@ function renderUserTable() {
       if (u.suspended) badges.push('<span class="badge badge--suspended">Suspended</span>');
       const statusHtml = badges.length ? badges.join(' ') : '<span class="badge badge--ok">Active</span>';
       const created = new Date(u.created_at).toLocaleDateString();
+      const balance = u.balance != null ? fmt(u.balance) : 'N/A';
       html += `
         <tr class="${u.suspended ? 'suspended' : ''}">
           <td>${u.id}</td>
           <td><strong>${escapeHtml(u.username)}</strong></td>
           <td>${escapeHtml(u.email)}</td>
           <td>${statusHtml}</td>
+          <td>${balance}</td>
           <td>${u.aiNumbers || 0}</td>
           <td>${u.agents || 0}</td>
           <td>${created}</td>
