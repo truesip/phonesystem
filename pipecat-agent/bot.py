@@ -1109,10 +1109,8 @@ async def bot(session_args: Any):
             ).strip()
             content = str(args.get("content") or args.get("message") or args.get("text") or args.get("body") or "").strip()
 
-            from_didww_did_id = str(
-                args.get("from_didww_did_id")
-                or args.get("fromDidwwDidId")
-                or args.get("from_did_id")
+            from_did_id = str(
+                args.get("from_did_id")
                 or args.get("fromDidId")
                 or ""
             ).strip()
@@ -1135,8 +1133,8 @@ async def bot(session_args: Any):
                 "to_number": to_number,
                 "content": content,
             }
-            if from_didww_did_id:
-                payload["from_didww_did_id"] = from_didww_did_id
+            if from_did_id:
+                payload["from_did_id"] = from_did_id
 
             if call_id and call_domain:
                 payload["call_id"] = str(call_id)
