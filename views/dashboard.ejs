@@ -2263,6 +2263,7 @@
     const TOLLFREE_DID_MARKUP = <%= typeof tollfreeDidMarkup !== 'undefined' ? tollfreeDidMarkup : 25.20 %>;
     const AI_LOCAL_DID_FEE = <%= typeof aiLocalDidFee !== 'undefined' ? aiLocalDidFee : 10.20 %>;
     const AI_TOLLFREE_DID_FEE = <%= typeof aiTollfreeDidFee !== 'undefined' ? aiTollfreeDidFee : 25.20 %>;
+    const PUBLIC_BASE_URL = <%- JSON.stringify(typeof publicBaseUrl !== 'undefined' ? publicBaseUrl : 'https://www.Phone.System.net') %>;
     const $ = (s)=>document.querySelector(s);
     let meProfile = null;
     var billingPage = 0;
@@ -5887,11 +5888,9 @@
     }
 
     // AI Payment settings (Square/Stripe)
-    const PAYMENT_WEBHOOK_BASE = 'https://www.Phone.System.net';
-
     function getPaymentWebhookUrl(provider, userId) {
       if (!userId) return 'Loading...';
-      return `${PAYMENT_WEBHOOK_BASE}/webhooks/user-${provider}/${userId}`;
+      return `${PUBLIC_BASE_URL}/webhooks/user-${provider}/${userId}`;
     }
 
     async function loadSquareSettings(){

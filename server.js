@@ -3942,6 +3942,7 @@ app.get('/dashboard', requireAuth, (req, res) => {
     addFundsMethods,
     hasAddFundsMethods: addFundsMethods.length > 0,
     defaultFundMethod,
+    publicBaseUrl: process.env.PUBLIC_BASE_URL || 'https://www.Phone.System.net',
   });
 });
 
