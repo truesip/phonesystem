@@ -9459,9 +9459,6 @@ async function runDialerWorkerTick() {
         if (!claim || !claim.affectedRows) continue;
 
         await startDialerLeadCall({ campaign: c, lead });
-        
-        // 1 second delay = max 1 call per second to prevent Pipecat API rate limiting
-        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
   } catch (e) {
