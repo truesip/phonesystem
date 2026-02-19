@@ -483,6 +483,14 @@ async function loadStats() {
           <div class="kpi-value">${num(t.calls.total)}</div>
           <div class="kpi-label">Total Calls</div>
         </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${num(t.calls.minutes)}</div>
+          <div class="kpi-label">Total Minutes</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${fmt(t.calls.revenue)}</div>
+          <div class="kpi-label">Call Revenue</div>
+        </div>
       </div>
       <div class="stats-grid" style="margin-top:16px">
         <div class="stats-box">
