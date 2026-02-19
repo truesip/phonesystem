@@ -9460,9 +9460,8 @@ async function runDialerWorkerTick() {
 
         await startDialerLeadCall({ campaign: c, lead });
         
-        // Add 2s delay between calls to prevent Pipecat API rate limiting
-        // With 3 app instances, this ensures ~6 calls/second system-wide max
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Small delay to avoid bursting Pipecat API with simultaneous requests
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
   } catch (e) {
