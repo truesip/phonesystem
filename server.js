@@ -9459,6 +9459,10 @@ async function runDialerWorkerTick() {
         if (!claim || !claim.affectedRows) continue;
 
         await startDialerLeadCall({ campaign: c, lead });
+        
+        // Add 500ms delay between calls to prevent Pipecat API rate limiting
+        // when multiple app instances are running dialer workers simultaneously
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
   } catch (e) {
