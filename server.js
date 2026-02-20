@@ -82,8 +82,11 @@ const AI_CALLER_MEMORY_MAX_DAYS = Math.max(1, parseInt(process.env.AI_CALLER_MEM
 // Outbound dialer settings
 const DIALER_MIN_CONCURRENCY = 1;
 // Keep this aligned with Pipecat per-service capacity to avoid PCC-AGENT-AT-CAPACITY.
-// Magnus uses 20 and is stable at that level.
-const DIALER_MAX_CONCURRENCY = 20;
+// Default to 50 (typical Pipecat service max instances), but allow overriding via env.
+const DIALER_MAX_CONCURRENCY = Math.max(
+  DIALER_MIN_CONCURRENCY,
+  Math.min(200, parseInt(process.env.DIALER_MAX_CONCURRENCY || '50', 10) || 50)
+);
 const DIALER_MAX_LEADS_PER_UPLOAD = Math.max(1, parseInt(process.env.DIALER_MAX_LEADS_PER_UPLOAD || '5000', 10) || 5000);
 const DIALER_CAMPAIGN_STATUSES = ['draft', 'running', 'paused', 'completed', 'deleted'];
 const DIALER_LEAD_STATUSES = ['pending', 'queued', 'dialing', 'answered', 'voicemail', 'transferred', 'failed', 'completed'];
@@ -97,6 +100,10 @@ const DIALER_MAX_CONCURRENCY_PER_AGENT = Math.max(
     parseInt(process.env.DIALER_MAX_CONCURRENCY_PER_AGENT || String(DIALER_MAX_CONCURRENCY), 10) || DIALER_MAX_CONCURRENCY
   )
 );
+
+// Event-driven refill: when a dialout call ends, schedule the next lead to keep the batch full.
+const DIALER_REFILL_ON_DIALOUT_EVENTS = String(process.env.DIALER_REFILL_ON_DIALOUT_EVENTS ?? '1') !== '0';
+const DIALER_SCHEDULER_DEBOUNCE_MS = Math.max(0, parseInt(process.env.DIALER_SCHEDULER_DEBOUNCE_MS || '250', 10) || 250);
 
 function clampDialerConcurrencyLimit(raw) {
   const n = parseInt(String(raw ?? ''), 10);
@@ -8698,6 +8705,14 @@ app.post('/api/me/dialer/campaigns/:campaignId/leads-upload', requireAuth, diale
     const duplicates = prepared.length - inserted;
     await pool.execute('UPDATE dialer_campaigns SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?', [campaignId, userId]);
 
+    // If the campaign is already running, kick the scheduler so newly uploaded leads start dialing immediately
+    // (even when the interval-based worker is disabled).
+    try {
+      if (String(campaign.status || '').toLowerCase() === 'running') {
+        requestDialerWorkerTick({ reason: 'leads_upload', immediate: true });
+      }
+    } catch {}
+
     return res.json({
       success: true,
       data: { inserted, duplicates, invalid }
@@ -8737,6 +8752,11 @@ app.patch('/api/me/dialer/campaigns/:campaignId/status', requireAuth, async (req
         'UPDATE dialer_campaigns SET status = ?, concurrency_limit = ?, last_started_at = NOW(), updated_at = NOW() WHERE id = ? AND user_id = ?',
         ['running', concurrencySafe, campaignId, userId]
       );
+
+      // Event-driven scheduler: start the initial batch immediately on campaign start.
+      try {
+        requestDialerWorkerTick({ reason: 'campaign_start', immediate: true });
+      } catch {}
     } else if (action === 'pause') {
       await pool.execute(
         'UPDATE dialer_campaigns SET status = ?, last_paused_at = NOW(), updated_at = NOW() WHERE id = ? AND user_id = ?',
@@ -9407,6 +9427,7 @@ async function startDialerLeadCall({ campaign, lead }) {
     if (isCapacity) {
       if (agentId) {
         dialerAgentBackoffUntil.set(agentId, Date.now() + DIALER_CAPACITY_BACKOFF_MS);
+        scheduleDialerResumeAfterBackoff(agentId);
       }
       if (DEBUG) console.warn('[dialer.worker] Pipecat at capacity; backing off', {
         campaignId,
@@ -9456,6 +9477,59 @@ async function startDialerLeadCall({ campaign, lead }) {
 }
 
 const dialerAgentBackoffUntil = new Map();
+const dialerAgentBackoffResumeTimers = new Map();
+
+let dialerWorkerKickTimer = null;
+function requestDialerWorkerTick({ reason, immediate = false } = {}) {
+  // Fire-and-forget dialer scheduler kick used by routes and webhooks.
+  // Debounced by default to coalesce bursts of dialout events.
+  try {
+    if (!pool) return;
+    if (!PIPECAT_PUBLIC_API_KEY) return;
+
+    if (immediate) {
+      if (dialerWorkerKickTimer) {
+        try { clearTimeout(dialerWorkerKickTimer); } catch {}
+        dialerWorkerKickTimer = null;
+      }
+      setImmediate(() => {
+        runDialerWorkerTick().catch(() => {});
+      });
+      return;
+    }
+
+    if (dialerWorkerKickTimer) return;
+    dialerWorkerKickTimer = setTimeout(() => {
+      dialerWorkerKickTimer = null;
+      runDialerWorkerTick().catch(() => {});
+    }, DIALER_SCHEDULER_DEBOUNCE_MS);
+  } catch {}
+}
+
+function scheduleDialerResumeAfterBackoff(agentId) {
+  try {
+    const aid = Number(agentId) || 0;
+    if (!aid) return;
+
+    const until = Number(dialerAgentBackoffUntil.get(aid) || 0);
+    const delay = Math.max(0, until - Date.now());
+
+    const existing = dialerAgentBackoffResumeTimers.get(aid);
+    if (existing) {
+      try { clearTimeout(existing); } catch {}
+      dialerAgentBackoffResumeTimers.delete(aid);
+    }
+
+    // When the backoff expires, kick the worker to refill any open slots.
+    const t = setTimeout(() => {
+      dialerAgentBackoffResumeTimers.delete(aid);
+      requestDialerWorkerTick({ reason: 'capacity_backoff_expired', immediate: false });
+    }, delay + 25);
+
+    dialerAgentBackoffResumeTimers.set(aid, t);
+  } catch {}
+}
+
 let dialerWorkerRunning = false;
 async function runDialerWorkerTick() {
   if (!pool) return;
@@ -9592,11 +9666,19 @@ async function runDialerWorkerTick() {
 
 function startDialerWorker() {
   const intervalMs = (DIALER_WORKER_INTERVAL_SECONDS || 0) * 1000;
+
   if (!intervalMs) {
-    if (DEBUG) console.log('[dialer.worker] Disabled (no interval set)');
+    if (DEBUG) console.log('[dialer.worker] Interval disabled; using event-driven scheduling');
+    // Kick once on startup to resume any campaigns already marked running.
+    requestDialerWorkerTick({ reason: 'startup', immediate: true });
     return;
   }
+
   if (DEBUG) console.log('[dialer.worker] Enabled with interval (ms):', intervalMs);
+
+  // Kick once on startup so campaigns don't wait for the first interval.
+  requestDialerWorkerTick({ reason: 'startup', immediate: true });
+
   setInterval(() => {
     runDialerWorkerTick();
   }, intervalMs);
@@ -15681,8 +15763,8 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
     }
 
     // Update call log
-    const status = 'completed';
     const resultVal = result || 'answered';
+    const status = (String(resultVal).toLowerCase() === 'failed') ? 'error' : 'completed';
     await pool.execute(
       `UPDATE dialer_call_logs
        SET status = ?, result = ?, duration_sec = COALESCE(?, duration_sec)
@@ -15692,9 +15774,10 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
 
     // Update lead if we have one
     if (logRow.lead_id) {
-      const leadStatus = ['answered', 'voicemail', 'transferred'].includes(resultVal)
-        ? resultVal
-        : 'completed';
+      const rv = String(resultVal || '').toLowerCase();
+      const leadStatus = (rv === 'failed')
+        ? 'failed'
+        : (['answered', 'voicemail', 'transferred'].includes(rv) ? rv : 'completed');
       await pool.execute(
         'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
         [leadStatus, logRow.lead_id, logRow.user_id]
@@ -15739,6 +15822,13 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
     if (DEBUG) {
       console.log('[pipecat.dialout-completed] Updated:', { logId: logRow.id, leadId: logRow.lead_id });
     }
+
+    // Event-driven refill: when a dialout call ends, schedule the next lead to keep the batch full.
+    try {
+      if (DIALER_REFILL_ON_DIALOUT_EVENTS) {
+        requestDialerWorkerTick({ reason: 'pipecat_dialout_completed', immediate: false });
+      }
+    } catch {}
 
     return res.json({ success: true });
   } catch (e) {
@@ -16283,6 +16373,18 @@ app.post('/webhooks/daily/events', async (req, res) => {
               });
             }
           }
+
+          // Event-driven refill: when a dialout call ends (or errors), schedule the next lead.
+          try {
+            if (
+              DIALER_REFILL_ON_DIALOUT_EVENTS
+              && (type === 'dialout.stopped' || type === 'dialout.error')
+              && (leadRow || logRow)
+            ) {
+              requestDialerWorkerTick({ reason: type, immediate: false });
+            }
+          } catch {}
+
           continue;
         }
 
