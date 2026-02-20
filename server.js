@@ -105,6 +105,12 @@ const DIALER_MAX_CONCURRENCY_PER_AGENT = Math.max(
 const DIALER_REFILL_ON_DIALOUT_EVENTS = String(process.env.DIALER_REFILL_ON_DIALOUT_EVENTS ?? '1') !== '0';
 const DIALER_SCHEDULER_DEBOUNCE_MS = Math.max(0, parseInt(process.env.DIALER_SCHEDULER_DEBOUNCE_MS || '250', 10) || 250);
 
+// Optional distributed lock for dialer scheduling.
+// Prevents multiple app instances/processes from scheduling simultaneously (which can exceed concurrency limits).
+const DIALER_WORKER_DB_LOCK = String(process.env.DIALER_WORKER_DB_LOCK ?? '1') !== '0';
+const DIALER_WORKER_DB_LOCK_NAME = String(process.env.DIALER_WORKER_DB_LOCK_NAME || 'dialer_worker').trim() || 'dialer_worker';
+const DIALER_WORKER_DB_LOCK_WAIT_SECONDS = Math.max(0, parseInt(process.env.DIALER_WORKER_DB_LOCK_WAIT_SECONDS || '0', 10) || 0);
+
 // Optional: gate outbound dialer starts based on Pipecat service activeSessionCount.
 // This prevents 429 PCC-AGENT-AT-CAPACITY storms when the service is full (including inbound + zombie sessions).
 const DIALER_PIPECAT_ACTIVE_SESSION_GATING = String(process.env.DIALER_PIPECAT_ACTIVE_SESSION_GATING ?? '1') !== '0';
@@ -9681,6 +9687,35 @@ async function runDialerWorkerTick() {
     return;
   }
 
+  // Optional distributed lock: prevents multiple schedulers from overscheduling across instances.
+  let lockConn = null;
+  let lockHeld = false;
+  if (DIALER_WORKER_DB_LOCK) {
+    try {
+      lockConn = await pool.getConnection();
+      const [rows] = await lockConn.query('SELECT GET_LOCK(?, ?) AS got', [
+        DIALER_WORKER_DB_LOCK_NAME,
+        DIALER_WORKER_DB_LOCK_WAIT_SECONDS
+      ]);
+      const got = rows && rows[0] ? Number(rows[0].got) : 0;
+      lockHeld = got === 1;
+      if (!lockHeld) {
+        if (DEBUG) console.log('[dialer.worker] tick skipped (db lock busy)');
+        try { lockConn.release(); } catch {}
+        lockConn = null;
+        return;
+      }
+    } catch (e) {
+      // Fail open to preserve behavior if GET_LOCK is unavailable.
+      if (DEBUG) console.warn('[dialer.worker] Failed to acquire db lock; continuing without lock:', e?.message || e);
+      lockHeld = false;
+      if (lockConn) {
+        try { lockConn.release(); } catch {}
+        lockConn = null;
+      }
+    }
+  }
+
   dialerWorkerRunning = true;
   try {
     const [campaigns] = await pool.query(
@@ -9697,8 +9732,9 @@ async function runDialerWorkerTick() {
     const campaignRows = Array.isArray(campaigns) ? campaigns : [];
     const campaignIds = campaignRows.map(c => Number(c.id)).filter(Boolean);
 
-    // Compute in-progress calls per campaign using dialer_call_logs.
-    // This avoids undercounting when lead status changes (e.g. answered) but the call is still live.
+    // Compute in-progress calls per campaign.
+    // - Primary: dialer_call_logs (queued/dialing/connected)
+    // - Fallback: dialer_leads (queued/dialing) to avoid undercounting if call log rows are missing
     const inProgressByCampaignId = new Map();
     if (campaignIds.length) {
       try {
@@ -9716,6 +9752,25 @@ async function runDialerWorkerTick() {
         }
       } catch (e) {
         if (DEBUG) console.warn('[dialer.worker] Failed to compute in-progress dialer_call_logs:', e?.message || e);
+      }
+
+      try {
+        const [rows] = await pool.query(
+          `SELECT campaign_id, COUNT(*) AS cnt
+           FROM dialer_leads
+           WHERE campaign_id IN (?) AND status IN ('queued','dialing')
+           GROUP BY campaign_id`,
+          [campaignIds]
+        );
+        for (const r of rows || []) {
+          const cid = Number(r.campaign_id);
+          if (!cid) continue;
+          const leadCnt = Number(r.cnt || 0);
+          const prev = Number(inProgressByCampaignId.get(cid) || 0);
+          if (leadCnt > prev) inProgressByCampaignId.set(cid, leadCnt);
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[dialer.worker] Failed to compute in-progress dialer_leads:', e?.message || e);
       }
     }
 
@@ -9856,6 +9911,11 @@ async function runDialerWorkerTick() {
     if (DEBUG) console.warn('[dialer.worker] tick error:', e?.message || e);
   } finally {
     dialerWorkerRunning = false;
+    if (lockConn) {
+      try { await lockConn.query('SELECT RELEASE_LOCK(?) AS released', [DIALER_WORKER_DB_LOCK_NAME]); } catch {}
+      try { lockConn.release(); } catch {}
+      lockConn = null;
+    }
   }
 }
 
