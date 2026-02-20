@@ -104,6 +104,8 @@ services:
         value: "2000"
       - key: DIALER_PIPECAT_CAPACITY_HEADROOM
         value: "5"
+      - key: DIALER_MAX_CONCURRENCY
+        value: "20"
       - key: DIALER_MAX_CONCURRENCY_PER_AGENT
         value: "40"
       - key: DIALER_GLOBAL_MAX_DIALOUT
