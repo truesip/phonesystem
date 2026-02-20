@@ -103,7 +103,11 @@ services:
       - key: PIPECAT_SERVICE_STATUS_CACHE_MS
         value: "2000"
       - key: DIALER_PIPECAT_CAPACITY_HEADROOM
-        value: "0"
+        value: "5"
+      - key: DIALER_MAX_CONCURRENCY_PER_AGENT
+        value: "40"
+      - key: DIALER_GLOBAL_MAX_DIALOUT
+        value: "40"
 
       # ── Provider API keys ──
       - key: DEEPGRAM_API_KEY
