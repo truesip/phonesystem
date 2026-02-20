@@ -874,6 +874,16 @@ async def bot(session_args: Any):
     except Exception:
         pass
 
+    # Pipecat Cloud session identifier (used by the portal to explicitly stop sessions)
+    try:
+        pipecat_session_id = str(
+            getattr(session_args, "session_id", "")
+            or getattr(session_args, "sessionId", "")
+            or ""
+        ).strip()
+    except Exception:
+        pipecat_session_id = ""
+
     daily_params = DailyParams(
         api_key=daily_api_key or "",
         api_url=daily_api_url or "https://api.daily.co/v1",
@@ -3195,6 +3205,7 @@ async def bot(session_args: Any):
     async def _maybe_start_dialout():
         nonlocal dialout_started
         nonlocal dialout_starting
+        nonlocal pipecat_session_id
 
         if not dialout_settings or dialout_started or dialout_starting:
             return
@@ -3212,7 +3223,22 @@ async def bot(session_args: Any):
                     break
                 dialout_started = True
                 if session_id:
-                    logger.info(f"Dialout started: session_id={session_id}")
+                    pipecat_session_id = str(session_id)
+                    logger.info(f"Dialout started: session_id={pipecat_session_id}")
+                else:
+                    # Fallback: inspect transport client internals for the dial-out session id.
+                    try:
+                        client = getattr(transport, "_client", None)
+                        if client is not None:
+                            sid = (
+                                str(getattr(client, "_dial_out_session_id", "") or "").strip()
+                                or str(getattr(client, "_dial_in_session_id", "") or "").strip()
+                            )
+                            if sid:
+                                pipecat_session_id = sid
+                                logger.info(f"Dialout started (client session): session_id={pipecat_session_id}")
+                    except Exception:
+                        pass
                 break
         except Exception as e:
             logger.error(f"Dialout start failed: {e}")
@@ -3282,13 +3308,15 @@ async def bot(session_args: Any):
         if dialout_settings and call_id and portal_base_url:
             try:
                 webhook_url = f"{portal_base_url}/webhooks/pipecat/dialout-completed"
-                webhook_payload = {
+                webhook_payload: dict[str, Any] = {
                     "call_id": call_id,
                     "call_domain": call_domain,
                     "result": "transferred" if call_transferred else call_result,
                     "duration_sec": call_duration_sec,
                     "dialout_phone": dialout_settings.get("phoneNumber") or dialout_settings.get("phone_number") or "",
                 }
+                if pipecat_session_id:
+                    webhook_payload["pipecat_session_id"] = pipecat_session_id
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     headers = {"Content-Type": "application/json"}
                     if portal_token:
@@ -3297,6 +3325,27 @@ async def bot(session_args: Any):
                     logger.info(f"Dialout callback sent: {resp.status_code}")
             except Exception as e:
                 logger.warning(f"Failed to send dialout callback: {e}")
+
+        # Send dialin status callback to portal if this was an inbound AI call
+        if dialin_settings and call_id and portal_base_url:
+            try:
+                webhook_url = f"{portal_base_url}/webhooks/pipecat/dialin-completed"
+                payload: dict[str, Any] = {
+                    "call_id": call_id,
+                    "call_domain": call_domain,
+                    "result": "transferred" if call_transferred else call_result,
+                    "duration_sec": call_duration_sec,
+                }
+                if pipecat_session_id:
+                    payload["pipecat_session_id"] = pipecat_session_id
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    headers = {"Content-Type": "application/json"}
+                    if portal_token:
+                        headers["Authorization"] = f"Bearer {portal_token}"
+                    resp = await client.post(webhook_url, json=payload, headers=headers)
+                    logger.info(f"Dialin callback sent: {resp.status_code}")
+            except Exception as e:
+                logger.warning(f"Failed to send dialin callback: {e}")
 
         # Best-effort: flush a few pending transcript log tasks.
         try:

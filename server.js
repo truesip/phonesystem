@@ -2195,11 +2195,12 @@ async function initDb() {
     CONSTRAINT fk_dialer_logs_agent FOREIGN KEY (ai_agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
   )`);
 
-  // Ensure dialer_call_logs billing columns exist (price + billed markers)
+  // Ensure dialer_call_logs columns exist (price/billing markers + Pipecat session tracking)
   for (const col of [
     { name: 'price', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN price DECIMAL(18,8) NULL' },
     { name: 'billed', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN billed TINYINT(1) NOT NULL DEFAULT 0' },
-    { name: 'billing_history_id', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN billing_history_id BIGINT NULL' }
+    { name: 'billing_history_id', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN billing_history_id BIGINT NULL' },
+    { name: 'pipecat_session_id', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN pipecat_session_id VARCHAR(128) NULL AFTER call_id' }
   ]) {
     try {
       const [rows] = await pool.query(
@@ -2850,6 +2851,20 @@ async function initDb() {
       }
     } catch (e) {
       if (DEBUG) console.warn('[schema] ai_call_logs.event_call_domain check failed', e.message || e);
+    }
+
+    // Track Pipecat Cloud session ids for AI calls
+    try {
+      const [hasSessionId] = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='ai_call_logs' AND column_name='pipecat_session_id' LIMIT 1",
+        [dbName]
+      );
+      if (!hasSessionId || !hasSessionId.length) {
+        await pool.query('ALTER TABLE ai_call_logs ADD COLUMN pipecat_session_id VARCHAR(128) NULL AFTER call_domain');
+        if (DEBUG) console.log('[schema] Added ai_call_logs.pipecat_session_id column');
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] ai_call_logs.pipecat_session_id check failed', e.message || e);
     }
 
     try {
@@ -10552,6 +10567,45 @@ async function pipecatDeleteAgent(agentName) {
   }
 }
 
+// Stop a single Pipecat Cloud agent session by id.
+// Uses the private API endpoint: DELETE /v1/agents/{agentName}/sessions/{sessionId}
+async function pipecatStopAgentSession({ agentName, sessionId }) {
+  const svc = String(agentName || '').trim();
+  const sid = String(sessionId || '').trim();
+  if (!svc || !sid) {
+    if (DEBUG) console.warn('[pipecat.sessions.stop] Missing agentName/sessionId', { agentName: svc, sessionId: sid });
+    return { ok: false, reason: 'missing_params' };
+  }
+
+  try {
+    const resp = await pipecatApiCall({
+      method: 'DELETE',
+      path: `/agents/${encodeURIComponent(svc)}/sessions/${encodeURIComponent(sid)}`
+    });
+    if (DEBUG) {
+      console.log('[pipecat.sessions.stop] Stopped session', { agentName: svc, sessionId: sid });
+    }
+    return { ok: true, response: resp };
+  } catch (e) {
+    const status = e && (e.status || e.statusCode);
+    if (status === 404 || status === 410) {
+      if (DEBUG) {
+        console.log('[pipecat.sessions.stop] Session already gone', { agentName: svc, sessionId: sid, status });
+      }
+      return { ok: true, already: true };
+    }
+    if (DEBUG) {
+      console.warn('[pipecat.sessions.stop] Failed to stop session', {
+        agentName: svc,
+        sessionId: sid,
+        status,
+        error: e?.message || e
+      });
+    }
+    return { ok: false, error: e };
+  }
+}
+
 async function pipecatDeleteSecretSet(setName) {
   try {
     await pipecatApiCall({ method: 'DELETE', path: `/secrets/${encodeURIComponent(setName)}` });
@@ -16036,6 +16090,7 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
     const callId = String(req.body?.call_id || '').trim();
     const result = String(req.body?.result || '').trim();
     const durationSec = req.body?.duration_sec != null ? Number(req.body.duration_sec) : null;
+    const pipecatSessionId = String(req.body?.pipecat_session_id || req.body?.session_id || '').trim();
 
     if (!callId) {
       if (DEBUG) console.warn('[pipecat.dialout-completed] Missing call_id');
@@ -16043,12 +16098,12 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
     }
 
     if (DEBUG) {
-      console.log('[pipecat.dialout-completed] Received:', { callId, result, durationSec });
+      console.log('[pipecat.dialout-completed] Received:', { callId, result, durationSec, pipecatSessionId });
     }
 
     // Find the call log by call_id
     const [logRows] = await pool.execute(
-      'SELECT id, lead_id, user_id FROM dialer_call_logs WHERE call_id = ? ORDER BY id DESC LIMIT 1',
+      'SELECT id, lead_id, user_id, ai_agent_id FROM dialer_call_logs WHERE call_id = ? ORDER BY id DESC LIMIT 1',
       [callId]
     );
     const logRow = logRows && logRows[0] ? logRows[0] : null;
@@ -16095,7 +16150,7 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
         const billsecVal = Math.max(0, Number(billRow.duration_sec || 0));
         const rate = rateDialerOutboundCallPrice({ billsec: billsecVal });
         const amount = (Number(billRow.price || 0) > 0) ? Number(billRow.price || 0) : Number(rate.price || 0);
-        const chargeDesc = `AI outbound call – ${String(billRow.to_number || '').trim() || String(billRow.call_id || '')}`.slice(0, 255);
+        const chargeDesc = `AI outbound call  ${String(billRow.to_number || '').trim() || String(billRow.call_id || '')}`.slice(0, 255);
         const chargeRes = await chargeDialerOutboundCallLog({
           dialerCallLogId: billRow.id,
           userId: billRow.user_id,
@@ -16115,6 +16170,45 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
       if (DEBUG) console.warn('[pipecat.dialout-completed] Failed to charge outbound call:', e?.message || e);
     }
 
+    // Stop the corresponding Pipecat session (if provided) to prevent lingering active sessions.
+    if (pipecatSessionId) {
+      try {
+        // Persist session id on the call log for debugging.
+        try {
+          await pool.execute(
+            'UPDATE dialer_call_logs SET pipecat_session_id = COALESCE(pipecat_session_id, ?) WHERE id = ? LIMIT 1',
+            [pipecatSessionId, logRow.id]
+          );
+        } catch (e) {
+          if (DEBUG) console.warn('[pipecat.dialout-completed] Failed to persist pipecat_session_id:', e?.message || e);
+        }
+
+        let agentName = null;
+        if (logRow.ai_agent_id) {
+          try {
+            const [agentRows] = await pool.execute(
+              'SELECT pipecat_agent_name FROM ai_agents WHERE id = ? LIMIT 1',
+              [logRow.ai_agent_id]
+            );
+            const agent = agentRows && agentRows[0] ? agentRows[0] : null;
+            if (agent && agent.pipecat_agent_name) {
+              agentName = String(agent.pipecat_agent_name || '').trim();
+            }
+          } catch (e) {
+            if (DEBUG) console.warn('[pipecat.dialout-completed] Failed to load agent for session stop:', e?.message || e);
+          }
+        }
+
+        if (agentName) {
+          await pipecatStopAgentSession({ agentName, sessionId: pipecatSessionId });
+        } else if (DEBUG) {
+          console.warn('[pipecat.dialout-completed] Missing agentName for session stop', { callId, pipecatSessionId });
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[pipecat.dialout-completed] Error while stopping Pipecat session:', e?.message || e);
+      }
+    }
+
     if (DEBUG) {
       console.log('[pipecat.dialout-completed] Updated:', { logId: logRow.id, leadId: logRow.lead_id });
     }
@@ -16129,6 +16223,89 @@ app.post('/webhooks/pipecat/dialout-completed', async (req, res) => {
     return res.json({ success: true });
   } catch (e) {
     if (DEBUG) console.error('[pipecat.dialout-completed] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Internal error' });
+  }
+});
+
+// Pipecat agent callback for dialin calls completing.
+// This is optional and used primarily to capture the Pipecat session id and
+// explicitly stop the session from the portal when an inbound call ends.
+app.post('/webhooks/pipecat/dialin-completed', async (req, res) => {
+  try {
+    if (!pool) return res.status(200).json({ success: true });
+
+    const callId = String(req.body?.call_id || '').trim();
+    const callDomain = String(req.body?.call_domain || '').trim();
+    const pipecatSessionId = String(req.body?.pipecat_session_id || req.body?.session_id || '').trim();
+
+    if (!callId) {
+      if (DEBUG) console.warn('[pipecat.dialin-completed] Missing call_id');
+      return res.status(400).json({ success: false, message: 'Missing call_id' });
+    }
+
+    if (DEBUG) {
+      console.log('[pipecat.dialin-completed] Received:', { callId, callDomain, pipecatSessionId });
+    }
+
+    let logRow = null;
+    try {
+      const [rows] = await pool.execute(
+        'SELECT id, user_id, agent_id FROM ai_call_logs WHERE call_id = ? AND (call_domain = ? OR ? = "") ORDER BY id DESC LIMIT 1',
+        [callId, callDomain, callDomain]
+      );
+      logRow = rows && rows[0] ? rows[0] : null;
+    } catch (e) {
+      if (DEBUG) console.warn('[pipecat.dialin-completed] ai_call_logs lookup failed:', e?.message || e);
+    }
+
+    if (!logRow && DEBUG) {
+      console.warn('[pipecat.dialin-completed] Call log not found:', { callId, callDomain });
+    }
+
+    let agentName = null;
+    if (logRow && logRow.agent_id) {
+      try {
+        const [agentRows] = await pool.execute(
+          'SELECT pipecat_agent_name FROM ai_agents WHERE id = ? LIMIT 1',
+          [logRow.agent_id]
+        );
+        const agent = agentRows && agentRows[0] ? agentRows[0] : null;
+        if (agent && agent.pipecat_agent_name) {
+          agentName = String(agent.pipecat_agent_name || '').trim();
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[pipecat.dialin-completed] Failed to load agent for session stop:', e?.message || e);
+      }
+    }
+
+    if (pipecatSessionId && logRow) {
+      try {
+        await pool.execute(
+          'UPDATE ai_call_logs SET pipecat_session_id = COALESCE(pipecat_session_id, ?) WHERE id = ? LIMIT 1',
+          [pipecatSessionId, logRow.id]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[pipecat.dialin-completed] Failed to persist pipecat_session_id:', e?.message || e);
+      }
+    }
+
+    if (pipecatSessionId && agentName) {
+      try {
+        await pipecatStopAgentSession({ agentName, sessionId: pipecatSessionId });
+      } catch (e) {
+        if (DEBUG) console.warn('[pipecat.dialin-completed] Error while stopping Pipecat session:', e?.message || e);
+      }
+    } else if (DEBUG && pipecatSessionId) {
+      console.warn('[pipecat.dialin-completed] Missing agentName for session stop', {
+        callId,
+        callDomain,
+        pipecatSessionId
+      });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[pipecat.dialin-completed] error:', e?.message || e);
     return res.status(500).json({ success: false, message: 'Internal error' });
   }
 });
