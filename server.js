@@ -82,10 +82,10 @@ const AI_CALLER_MEMORY_MAX_DAYS = Math.max(1, parseInt(process.env.AI_CALLER_MEM
 // Outbound dialer settings
 const DIALER_MIN_CONCURRENCY = 1;
 // Keep this aligned with Pipecat per-service capacity to avoid PCC-AGENT-AT-CAPACITY.
-// Default to 50 (typical Pipecat service max instances), but allow overriding via env.
+// Default to 20, but allow overriding via env.
 const DIALER_MAX_CONCURRENCY = Math.max(
   DIALER_MIN_CONCURRENCY,
-  Math.min(200, parseInt(process.env.DIALER_MAX_CONCURRENCY || '50', 10) || 50)
+  Math.min(200, parseInt(process.env.DIALER_MAX_CONCURRENCY || '20', 10) || 20)
 );
 const DIALER_MAX_LEADS_PER_UPLOAD = Math.max(1, parseInt(process.env.DIALER_MAX_LEADS_PER_UPLOAD || '5000', 10) || 5000);
 const DIALER_CAMPAIGN_STATUSES = ['draft', 'running', 'paused', 'completed', 'deleted'];
