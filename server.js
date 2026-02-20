@@ -9734,7 +9734,6 @@ async function runDialerWorkerTick() {
        LIMIT 200`
     );
 
-<<<<<<< HEAD
     const campaignRows = Array.isArray(campaigns) ? campaigns : [];
     const campaignIds = campaignRows.map(c => Number(c.id)).filter(Boolean);
 
@@ -9814,8 +9813,6 @@ async function runDialerWorkerTick() {
       }
     }
 
-    for (const c of campaignRows) {
-=======
     // Optional global cap across all campaigns to avoid hitting Pipecat/Daily dial-out limits.
     let globalInProgress = 0;
     if (DIALER_GLOBAL_MAX_DIALOUT > 0) {
@@ -9832,8 +9829,7 @@ async function runDialerWorkerTick() {
       }
     }
 
-    for (const c of campaigns || []) {
->>>>>>> d4e9eec (Add global dial-out concurrency cap for Pipecat/Daily)
+    for (const c of campaignRows) {
       const campaignId = Number(c.id);
       const userId = Number(c.user_id);
       const agentId = Number(c.ai_agent_id) || 0;
@@ -9849,7 +9845,6 @@ async function runDialerWorkerTick() {
         }
       }
 
-<<<<<<< HEAD
       const configuredConcurrency = parseInt(String(c.concurrency_limit ?? ''), 10);
       const concurrency = clampDialerConcurrencyLimit(configuredConcurrency);
       if (Number.isFinite(configuredConcurrency) && configuredConcurrency !== concurrency) {
@@ -9868,18 +9863,23 @@ async function runDialerWorkerTick() {
       const availableAgent = agentId ? Math.max(0, DIALER_MAX_CONCURRENCY_PER_AGENT - inProgressAgent) : availableCampaign;
 
       let available = Math.max(0, Math.min(availableCampaign, availableAgent));
-=======
-      const localAvailable = Math.max(0, concurrency - inProgress);
-      if (!localAvailable) continue;
 
-      let available = localAvailable;
-      if (DIALER_GLOBAL_MAX_DIALOUT > 0) {
+      if (available && DIALER_GLOBAL_MAX_DIALOUT > 0) {
         const globalAvailable = Math.max(0, DIALER_GLOBAL_MAX_DIALOUT - globalInProgress);
-        if (!globalAvailable) continue;
-        available = Math.min(localAvailable, globalAvailable);
+        if (!globalAvailable) {
+          if (DEBUG) {
+            console.log('[dialer.worker] Global dial-out cap reached; skipping campaign', {
+              campaignId,
+              userId,
+              inProgress: globalInProgress,
+              max: DIALER_GLOBAL_MAX_DIALOUT
+            });
+          }
+          continue;
+        }
+        available = Math.max(0, Math.min(available, globalAvailable));
       }
 
->>>>>>> d4e9eec (Add global dial-out concurrency cap for Pipecat/Daily)
       if (!available) continue;
 
       const serviceName = String(c.pipecat_agent_name || '').trim();
@@ -9929,7 +9929,6 @@ async function runDialerWorkerTick() {
         );
         if (!claim || !claim.affectedRows) continue;
 
-<<<<<<< HEAD
         // Reserve the slot for this tick (prevents overscheduling across campaigns sharing an agent).
         inProgressByCampaignId.set(campaignId, (Number(inProgressByCampaignId.get(campaignId) || 0) + 1));
         if (agentId) {
@@ -9938,19 +9937,15 @@ async function runDialerWorkerTick() {
         if (DIALER_PIPECAT_ACTIVE_SESSION_GATING && PIPECAT_API_KEY && serviceName) {
           reservedByServiceName.set(serviceName, (Number(reservedByServiceName.get(serviceName) || 0) + 1));
         }
+        if (DIALER_GLOBAL_MAX_DIALOUT > 0) {
+          globalInProgress += 1;
+        }
 
         const startRes = await startDialerLeadCall({ campaign: c, lead });
         if (startRes && startRes.capacity) {
           // Stop scheduling more calls for this agent/campaign until backoff expires.
           break;
         }
-=======
-        if (DIALER_GLOBAL_MAX_DIALOUT > 0) {
-          globalInProgress += 1;
-        }
-
-        await startDialerLeadCall({ campaign: c, lead });
->>>>>>> d4e9eec (Add global dial-out concurrency cap for Pipecat/Daily)
       }
     }
   } catch (e) {
