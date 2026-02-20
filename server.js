@@ -81,12 +81,21 @@ const AI_CALLER_MEMORY_MAX_CHARS_PER_MESSAGE = Math.max(
 const AI_CALLER_MEMORY_MAX_DAYS = Math.max(1, parseInt(process.env.AI_CALLER_MEMORY_MAX_DAYS || '30', 10) || 30);
 // Outbound dialer settings
 const DIALER_MIN_CONCURRENCY = 1;
-const DIALER_MAX_CONCURRENCY = 50;
+// Keep this aligned with Pipecat per-service capacity to avoid PCC-AGENT-AT-CAPACITY.
+// Magnus uses 20 and is stable at that level.
+const DIALER_MAX_CONCURRENCY = 20;
 const DIALER_MAX_LEADS_PER_UPLOAD = Math.max(1, parseInt(process.env.DIALER_MAX_LEADS_PER_UPLOAD || '5000', 10) || 5000);
 const DIALER_CAMPAIGN_STATUSES = ['draft', 'running', 'paused', 'completed', 'deleted'];
 const DIALER_LEAD_STATUSES = ['pending', 'queued', 'dialing', 'answered', 'voicemail', 'transferred', 'failed', 'completed'];
 const DIALER_WORKER_INTERVAL_SECONDS = Math.max(0, parseInt(process.env.DIALER_WORKER_INTERVAL_SECONDS || '0', 10) || 0);
 const DIALER_DAILY_ROOM_TTL_SECONDS = Math.max(0, parseInt(process.env.DIALER_DAILY_ROOM_TTL_SECONDS || '1800', 10) || 1800);
+const DIALER_CAPACITY_BACKOFF_MS = Math.max(1000, parseInt(process.env.DIALER_CAPACITY_BACKOFF_MS || '15000', 10) || 15000);
+
+function clampDialerConcurrencyLimit(raw) {
+  const n = parseInt(String(raw ?? ''), 10);
+  if (!Number.isFinite(n)) return DIALER_MIN_CONCURRENCY;
+  return Math.min(DIALER_MAX_CONCURRENCY, Math.max(DIALER_MIN_CONCURRENCY, n));
+}
 // Dialer outbound call billing (per-minute equivalent, billed per second by default)
 const DIALER_OUTBOUND_RATE_PER_MIN = parseFloat(
   process.env.DIALER_OUTBOUND_RATE_PER_MIN || String(AI_INBOUND_LOCAL_RATE_PER_MIN)
@@ -3884,6 +3893,8 @@ app.get('/dashboard', requireAuth, (req, res) => {
     hasAddFundsMethods: addFundsMethods.length > 0,
     defaultFundMethod,
     publicBaseUrl: process.env.PUBLIC_BASE_URL || 'https://www.Phone.System.net',
+    dialerMinConcurrency: DIALER_MIN_CONCURRENCY,
+    dialerMaxConcurrency: DIALER_MAX_CONCURRENCY,
   });
 });
 
@@ -8582,10 +8593,7 @@ app.post('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
     if (!name) return res.status(400).json({ success: false, message: 'Campaign name is required' });
     // AI agent is optional now - if not provided, campaign must use audio-only mode
 
-    const concurrency = Math.min(
-      DIALER_MAX_CONCURRENCY,
-      Math.max(DIALER_MIN_CONCURRENCY, Number.isFinite(concurrencyRaw) ? concurrencyRaw : DIALER_MIN_CONCURRENCY)
-    );
+    const concurrency = clampDialerConcurrencyLimit(concurrencyRaw);
 
     let agent = null;
     if (aiAgentId) {
@@ -8716,9 +8724,11 @@ app.patch('/api/me/dialer/campaigns/:campaignId/status', requireAuth, async (req
       if (!available) {
         return res.status(400).json({ success: false, message: 'Upload at least one pending lead before starting.' });
       }
+
+      const concurrencySafe = clampDialerConcurrencyLimit(campaign.concurrency_limit);
       await pool.execute(
-        'UPDATE dialer_campaigns SET status = ?, last_started_at = NOW(), updated_at = NOW() WHERE id = ? AND user_id = ?',
-        ['running', campaignId, userId]
+        'UPDATE dialer_campaigns SET status = ?, concurrency_limit = ?, last_started_at = NOW(), updated_at = NOW() WHERE id = ? AND user_id = ?',
+        ['running', concurrencySafe, campaignId, userId]
       );
     } else if (action === 'pause') {
       await pool.execute(
@@ -9228,7 +9238,7 @@ async function resolveDialerCallerId({ userId, agentId }) {
 }
 
 async function startDialerLeadCall({ campaign, lead }) {
-  if (!pool || !campaign || !lead) return false;
+  if (!pool || !campaign || !lead) return { ok: false };
   const campaignId = Number(campaign.id);
   const userId = Number(campaign.user_id);
   const leadId = Number(lead.id);
@@ -9269,7 +9279,7 @@ async function startDialerLeadCall({ campaign, lead }) {
         ['Missing Pipecat agent configuration - please select an AI agent (required for Pipecat endpoint)', leadId]
       );
     } catch {}
-    return false;
+    return { ok: false };
   }
 
   if (audioOnlyMode && !hasCampaignAudio) {
@@ -9285,7 +9295,7 @@ async function startDialerLeadCall({ campaign, lead }) {
         ['Audio-only campaign requires audio file', leadId]
       );
     } catch {}
-    return false;
+    return { ok: false };
   }
 
   const callerId = await resolveDialerCallerId({ userId, agentId });
@@ -9375,9 +9385,52 @@ async function startDialerLeadCall({ campaign, lead }) {
       );
     } catch {}
 
-    return true;
+    return { ok: true };
   } catch (e) {
+    const status = e?.status;
+    const code = e?.data?.code;
     const msg = e?.message || 'Failed to start Pipecat dial-out';
+
+    const isCapacity = status === 429 && (
+      code === 'PCC-AGENT-AT-CAPACITY'
+      || String(msg).toLowerCase().includes('maximum instances')
+      || String(msg).toLowerCase().includes('at capacity')
+    );
+
+    if (isCapacity) {
+      if (agentId) {
+        dialerAgentBackoffUntil.set(agentId, Date.now() + DIALER_CAPACITY_BACKOFF_MS);
+      }
+      if (DEBUG) console.warn('[dialer.worker] Pipecat at capacity; backing off', {
+        campaignId,
+        leadId,
+        agentId,
+        status,
+        code,
+        backoffMs: DIALER_CAPACITY_BACKOFF_MS
+      });
+
+      // Capacity is not a real call failure; return lead to pending so it can be retried.
+      try {
+        await pool.execute(
+          `UPDATE dialer_leads
+           SET status = 'pending', attempt_count = GREATEST(0, attempt_count - 1)
+           WHERE id = ? AND user_id = ? LIMIT 1`,
+          [leadId, userId]
+        );
+      } catch {}
+
+      // Remove the queued call log row since the call was never started.
+      try {
+        await pool.execute(
+          'DELETE FROM dialer_call_logs WHERE call_id = ? AND lead_id = ? LIMIT 1',
+          [callId, leadId]
+        );
+      } catch {}
+
+      return { ok: false, capacity: true };
+    }
+
     if (DEBUG) console.warn('[dialer.worker] Pipecat dial-out failed:', msg);
     try {
       await pool.execute(
@@ -9391,10 +9444,11 @@ async function startDialerLeadCall({ campaign, lead }) {
         [String(msg).slice(0, 500), leadId]
       );
     } catch {}
-    return false;
+    return { ok: false };
   }
 }
 
+const dialerAgentBackoffUntil = new Map();
 let dialerWorkerRunning = false;
 async function runDialerWorkerTick() {
   if (!pool) return;
@@ -9421,7 +9475,29 @@ async function runDialerWorkerTick() {
     for (const c of campaigns || []) {
       const campaignId = Number(c.id);
       const userId = Number(c.user_id);
-      const concurrency = Math.max(1, Number(c.concurrency_limit || 1));
+      const agentId = Number(c.ai_agent_id) || 0;
+
+      if (agentId) {
+        const until = Number(dialerAgentBackoffUntil.get(agentId) || 0);
+        if (until > Date.now()) {
+          if (DEBUG) {
+            const remainSec = Math.ceil((until - Date.now()) / 1000);
+            console.log(`[dialer.worker] Skipping campaign ${campaignId} (agent ${agentId}) due to capacity backoff (${remainSec}s)`);
+          }
+          continue;
+        }
+      }
+
+      const configuredConcurrency = parseInt(String(c.concurrency_limit ?? ''), 10);
+      const concurrency = clampDialerConcurrencyLimit(configuredConcurrency);
+      if (Number.isFinite(configuredConcurrency) && configuredConcurrency !== concurrency) {
+        try {
+          await pool.execute(
+            'UPDATE dialer_campaigns SET concurrency_limit = ? WHERE id = ? AND user_id = ? LIMIT 1',
+            [concurrency, campaignId, userId]
+          );
+        } catch {}
+      }
 
       let inProgress = 0;
       try {
@@ -9437,7 +9513,7 @@ async function runDialerWorkerTick() {
       const available = Math.max(0, concurrency - inProgress);
       if (!available) continue;
 
-      const limit = Math.min(available, 50);
+      const limit = Math.min(available, DIALER_MAX_CONCURRENCY);
       const [leads] = await pool.query(
         `SELECT id, phone_number, lead_name, metadata
          FROM dialer_leads
@@ -9458,10 +9534,11 @@ async function runDialerWorkerTick() {
         );
         if (!claim || !claim.affectedRows) continue;
 
-        await startDialerLeadCall({ campaign: c, lead });
-        
-        // Add 500ms delay between calls to prevent Pipecat API rate limit bursts
-        await new Promise(resolve => setTimeout(resolve, 500));
+        const startRes = await startDialerLeadCall({ campaign: c, lead });
+        if (startRes && startRes.capacity) {
+          // Stop scheduling more calls for this agent/campaign until backoff expires.
+          break;
+        }
       }
     }
   } catch (e) {
