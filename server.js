@@ -90,6 +90,13 @@ const DIALER_LEAD_STATUSES = ['pending', 'queued', 'dialing', 'answered', 'voice
 const DIALER_WORKER_INTERVAL_SECONDS = Math.max(0, parseInt(process.env.DIALER_WORKER_INTERVAL_SECONDS || '0', 10) || 0);
 const DIALER_DAILY_ROOM_TTL_SECONDS = Math.max(0, parseInt(process.env.DIALER_DAILY_ROOM_TTL_SECONDS || '1800', 10) || 1800);
 const DIALER_CAPACITY_BACKOFF_MS = Math.max(1000, parseInt(process.env.DIALER_CAPACITY_BACKOFF_MS || '15000', 10) || 15000);
+const DIALER_MAX_CONCURRENCY_PER_AGENT = Math.max(
+  1,
+  Math.min(
+    DIALER_MAX_CONCURRENCY,
+    parseInt(process.env.DIALER_MAX_CONCURRENCY_PER_AGENT || String(DIALER_MAX_CONCURRENCY), 10) || DIALER_MAX_CONCURRENCY
+  )
+);
 
 function clampDialerConcurrencyLimit(raw) {
   const n = parseInt(String(raw ?? ''), 10);
@@ -9472,7 +9479,42 @@ async function runDialerWorkerTick() {
        LIMIT 200`
     );
 
-    for (const c of campaigns || []) {
+    const campaignRows = Array.isArray(campaigns) ? campaigns : [];
+    const campaignIds = campaignRows.map(c => Number(c.id)).filter(Boolean);
+
+    // Compute in-progress calls per campaign using dialer_call_logs.
+    // This avoids undercounting when lead status changes (e.g. answered) but the call is still live.
+    const inProgressByCampaignId = new Map();
+    if (campaignIds.length) {
+      try {
+        const [rows] = await pool.query(
+          `SELECT campaign_id, COUNT(*) AS cnt
+           FROM dialer_call_logs
+           WHERE campaign_id IN (?) AND status IN ('queued','dialing','connected')
+           GROUP BY campaign_id`,
+          [campaignIds]
+        );
+        for (const r of rows || []) {
+          const cid = Number(r.campaign_id);
+          if (!cid) continue;
+          inProgressByCampaignId.set(cid, Number(r.cnt || 0));
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[dialer.worker] Failed to compute in-progress dialer_call_logs:', e?.message || e);
+      }
+    }
+
+    // Aggregate in-progress across campaigns for per-agent limiting.
+    const inProgressByAgentId = new Map();
+    for (const c of campaignRows) {
+      const agentId = Number(c.ai_agent_id) || 0;
+      if (!agentId) continue;
+      const campaignId = Number(c.id);
+      const cnt = inProgressByCampaignId.get(campaignId) || 0;
+      inProgressByAgentId.set(agentId, (inProgressByAgentId.get(agentId) || 0) + cnt);
+    }
+
+    for (const c of campaignRows) {
       const campaignId = Number(c.id);
       const userId = Number(c.user_id);
       const agentId = Number(c.ai_agent_id) || 0;
@@ -9499,18 +9541,12 @@ async function runDialerWorkerTick() {
         } catch {}
       }
 
-      let inProgress = 0;
-      try {
-        const [[cntRow]] = await pool.execute(
-          `SELECT COUNT(*) AS cnt
-           FROM dialer_leads
-           WHERE campaign_id = ? AND user_id = ? AND status IN ('queued','dialing')`,
-          [campaignId, userId]
-        );
-        inProgress = cntRow && cntRow.cnt != null ? Number(cntRow.cnt || 0) : 0;
-      } catch {}
+      const inProgressCampaign = Number(inProgressByCampaignId.get(campaignId) || 0);
+      const inProgressAgent = agentId ? Number(inProgressByAgentId.get(agentId) || 0) : 0;
 
-      const available = Math.max(0, concurrency - inProgress);
+      const availableCampaign = Math.max(0, concurrency - inProgressCampaign);
+      const availableAgent = agentId ? Math.max(0, DIALER_MAX_CONCURRENCY_PER_AGENT - inProgressAgent) : availableCampaign;
+      const available = Math.max(0, Math.min(availableCampaign, availableAgent));
       if (!available) continue;
 
       const limit = Math.min(available, DIALER_MAX_CONCURRENCY);
@@ -9533,6 +9569,12 @@ async function runDialerWorkerTick() {
           [leadId, userId]
         );
         if (!claim || !claim.affectedRows) continue;
+
+        // Reserve the slot for this tick (prevents overscheduling across campaigns sharing an agent).
+        inProgressByCampaignId.set(campaignId, (Number(inProgressByCampaignId.get(campaignId) || 0) + 1));
+        if (agentId) {
+          inProgressByAgentId.set(agentId, (Number(inProgressByAgentId.get(agentId) || 0) + 1));
+        }
 
         const startRes = await startDialerLeadCall({ campaign: c, lead });
         if (startRes && startRes.capacity) {
@@ -16001,7 +16043,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
               `SELECT id, campaign_id, user_id, status
                FROM dialer_leads
                WHERE REGEXP_REPLACE(phone_number, '[^0-9]', '') = ?
-                 AND status IN ('queued','dialing','pending','answered','voicemail','transferred')
+                 AND status IN ('queued','dialing','pending','answered','voicemail','transferred','completed','failed')
                  AND COALESCE(last_call_at, created_at) >= DATE_SUB(?, INTERVAL 12 HOUR)
                ORDER BY COALESCE(last_call_at, created_at) DESC, id DESC
                LIMIT 1`,
@@ -16017,10 +16059,10 @@ app.post('/webhooks/daily/events', async (req, res) => {
         function dialoutOutcomeFromReason(reasonLower) {
           if (!reasonLower) return null;
           if (reasonLower.includes('voicemail')) {
-            return { result: 'voicemail', leadStatus: 'voicemail' };
+            return { result: 'voicemail', leadStatus: 'completed' };
           }
           if (reasonLower.includes('transfer')) {
-            return { result: 'transferred', leadStatus: 'transferred' };
+            return { result: 'transferred', leadStatus: 'completed' };
           }
           if (
             reasonLower.includes('busy')
@@ -16033,7 +16075,7 @@ app.post('/webhooks/daily/events', async (req, res) => {
             return { result: 'failed', leadStatus: 'failed' };
           }
           if (reasonLower.includes('answer') || reasonLower.includes('connect')) {
-            return { result: 'answered', leadStatus: 'answered' };
+            return { result: 'answered', leadStatus: 'completed' };
           }
           return null;
         }
@@ -16074,7 +16116,9 @@ app.post('/webhooks/daily/events', async (req, res) => {
             leadStatus = 'dialing';
             logStatus = 'dialing';
           } else if (type === 'dialout.connected' || type === 'dialout.answered') {
-            leadStatus = 'answered';
+            // Keep lead status as dialing until we receive dialout.stopped.
+            // This prevents undercounting in-progress calls and overscheduling new calls.
+            leadStatus = 'dialing';
             logStatus = 'connected';
             resultVal = 'answered';
           } else if (type === 'dialout.warning') {
@@ -16123,14 +16167,12 @@ app.post('/webhooks/daily/events', async (req, res) => {
               const [r] = await pool.execute(
                 `UPDATE dialer_leads
                  SET status = CASE
+                   WHEN status IN ('completed','failed') THEN status
                    WHEN ? = 'failed' THEN 'failed'
-                   WHEN ? = 'voicemail' THEN 'voicemail'
-                   WHEN ? = 'transferred' THEN 'transferred'
-                   WHEN status IN ('answered','voicemail','transferred') THEN status
                    ELSE 'completed'
                  END
                  WHERE id = ? AND user_id = ? LIMIT 1`,
-                [statusToken, statusToken, statusToken, leadRow.id, leadRow.user_id]
+                [statusToken, leadRow.id, leadRow.user_id]
               );
               if (r && r.affectedRows) leadUpdated = true;
             } else if (leadStatus) {
@@ -16138,7 +16180,8 @@ app.post('/webhooks/daily/events', async (req, res) => {
               const [r] = await pool.execute(
                 `UPDATE dialer_leads
                  SET status = ?${setLastCall ? ', last_call_at = NOW()' : ''}
-                 WHERE id = ? AND user_id = ? LIMIT 1`,
+                 WHERE id = ? AND user_id = ? AND status IN ('pending','queued','dialing')
+                 LIMIT 1`,
                 [leadStatus, leadRow.id, leadRow.user_id]
               );
               if (r && r.affectedRows) leadUpdated = true;
