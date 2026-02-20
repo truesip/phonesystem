@@ -105,6 +105,13 @@ const DIALER_MAX_CONCURRENCY_PER_AGENT = Math.max(
 const DIALER_REFILL_ON_DIALOUT_EVENTS = String(process.env.DIALER_REFILL_ON_DIALOUT_EVENTS ?? '1') !== '0';
 const DIALER_SCHEDULER_DEBOUNCE_MS = Math.max(0, parseInt(process.env.DIALER_SCHEDULER_DEBOUNCE_MS || '250', 10) || 250);
 
+// Optional: gate outbound dialer starts based on Pipecat service activeSessionCount.
+// This prevents 429 PCC-AGENT-AT-CAPACITY storms when the service is full (including inbound + zombie sessions).
+const DIALER_PIPECAT_ACTIVE_SESSION_GATING = String(process.env.DIALER_PIPECAT_ACTIVE_SESSION_GATING ?? '1') !== '0';
+const PIPECAT_SERVICE_STATUS_CACHE_MS = Math.max(250, parseInt(process.env.PIPECAT_SERVICE_STATUS_CACHE_MS || '2000', 10) || 2000);
+// Reserve some capacity for inbound calls if needed (0 = use full service capacity).
+const DIALER_PIPECAT_CAPACITY_HEADROOM = Math.max(0, parseInt(process.env.DIALER_PIPECAT_CAPACITY_HEADROOM || '0', 10) || 0);
+
 function clampDialerConcurrencyLimit(raw) {
   const n = parseInt(String(raw ?? ''), 10);
   if (!Number.isFinite(n)) return DIALER_MIN_CONCURRENCY;
@@ -9530,6 +9537,138 @@ function scheduleDialerResumeAfterBackoff(agentId) {
   } catch {}
 }
 
+// Pipecat service status cache (used to gate starts when Pipecat is already at capacity).
+const pipecatServiceStatusCache = new Map();
+const pipecatServiceStatusInFlight = new Map();
+
+function parseNonNegativeIntMaybe(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (s === '') return null;
+  const n = parseInt(s, 10);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
+function parsePositiveIntMaybe(v) {
+  const n = parseNonNegativeIntMaybe(v);
+  return (n != null && n > 0) ? n : null;
+}
+
+function inferPipecatActiveSessionCount(service) {
+  const s = (service && typeof service === 'object') ? service : {};
+  const candidates = [
+    s.activeSessionCount,
+    s.active_session_count,
+    s.activeSessions,
+    s.active_sessions,
+  ];
+  for (const c of candidates) {
+    const n = parseNonNegativeIntMaybe(c);
+    if (n != null) return n;
+  }
+  return null;
+}
+
+function inferPipecatMaxSessions(service) {
+  const s = (service && typeof service === 'object') ? service : {};
+  const as = (s.autoScaling && typeof s.autoScaling === 'object')
+    ? s.autoScaling
+    : ((s.autoscaling && typeof s.autoscaling === 'object')
+      ? s.autoscaling
+      : ((s.auto_scaling && typeof s.auto_scaling === 'object') ? s.auto_scaling : {}));
+
+  // 1) Explicit service-wide max fields (if provided by API)
+  const explicitCandidates = [
+    s.maxInstances,
+    s.max_instances,
+    s.maxSessionCount,
+    s.max_session_count,
+    s.maxSessions,
+    s.max_sessions,
+  ];
+  for (const c of explicitCandidates) {
+    const n = parsePositiveIntMaybe(c);
+    if (n != null) return n;
+  }
+
+  // 2) Autoscaling: Pipecat commonly models capacity as concurrency per replica * maxReplicas
+  const concurrency = parsePositiveIntMaybe(as.concurrency);
+  const maxReplicas = parsePositiveIntMaybe(as.maxReplicas);
+  const maxAgents = parsePositiveIntMaybe(as.maxAgents);
+  if (concurrency != null && maxReplicas != null) return concurrency * maxReplicas;
+  if (concurrency != null && maxAgents != null) return concurrency * maxAgents;
+
+  // 3) Fallback: if only maxReplicas/maxAgents exists, assume 1 session per replica
+  if (maxReplicas != null) return maxReplicas;
+  if (maxAgents != null) return maxAgents;
+
+  // 4) Last resort: other possible autoscaling fields
+  const otherCandidates = [
+    as.max_instances,
+    as.maxSessions,
+    as.max_sessions,
+  ];
+  for (const c of otherCandidates) {
+    const n = parsePositiveIntMaybe(c);
+    if (n != null) return n;
+  }
+
+  return null;
+}
+
+async function getPipecatServiceStatusCached(serviceName) {
+  const name = String(serviceName || '').trim();
+  if (!name) return null;
+
+  const now = Date.now();
+  const cached = pipecatServiceStatusCache.get(name);
+  if (cached && (now - Number(cached.atMs || 0)) < PIPECAT_SERVICE_STATUS_CACHE_MS) {
+    return cached.data || null;
+  }
+
+  const inflight = pipecatServiceStatusInFlight.get(name);
+  if (inflight) return inflight;
+
+  const p = (async () => {
+    try {
+      const data = await pipecatApiCall({
+        method: 'GET',
+        path: `/agents/${encodeURIComponent(name)}`,
+      });
+      pipecatServiceStatusCache.set(name, { atMs: Date.now(), data });
+      return data;
+    } catch (e) {
+      // Negative cache to avoid request storms on repeated failures.
+      pipecatServiceStatusCache.set(name, { atMs: Date.now(), data: null });
+      return null;
+    } finally {
+      pipecatServiceStatusInFlight.delete(name);
+    }
+  })();
+
+  pipecatServiceStatusInFlight.set(name, p);
+  return p;
+}
+
+async function getPipecatServiceCapacityInfo(serviceName) {
+  const name = String(serviceName || '').trim();
+  if (!name) return null;
+  if (!DIALER_PIPECAT_ACTIVE_SESSION_GATING) return null;
+  if (!PIPECAT_API_KEY) return null;
+
+  const status = await getPipecatServiceStatusCached(name);
+  if (!status) return null;
+
+  const activeSessionCount = inferPipecatActiveSessionCount(status);
+  if (activeSessionCount == null) return null;
+
+  const maxSessions = inferPipecatMaxSessions(status) || DIALER_MAX_CONCURRENCY;
+  const effectiveMax = Math.max(0, Number(maxSessions || 0) - DIALER_PIPECAT_CAPACITY_HEADROOM);
+
+  return { activeSessionCount, maxSessions, effectiveMax };
+}
+
 let dialerWorkerRunning = false;
 async function runDialerWorkerTick() {
   if (!pool) return;
@@ -9545,11 +9684,13 @@ async function runDialerWorkerTick() {
   dialerWorkerRunning = true;
   try {
     const [campaigns] = await pool.query(
-      `SELECT id, user_id, name, ai_agent_id, ai_agent_name, concurrency_limit,
-              campaign_audio_blob, campaign_audio_size
-       FROM dialer_campaigns
-       WHERE status = 'running'
-       ORDER BY id DESC
+      `SELECT c.id, c.user_id, c.name, c.ai_agent_id, c.ai_agent_name, c.concurrency_limit,
+              c.campaign_audio_blob, c.campaign_audio_size,
+              a.pipecat_agent_name
+       FROM dialer_campaigns c
+       LEFT JOIN ai_agents a ON a.id = c.ai_agent_id AND a.user_id = c.user_id
+       WHERE c.status = 'running'
+       ORDER BY c.id DESC
        LIMIT 200`
     );
 
@@ -9588,6 +9729,30 @@ async function runDialerWorkerTick() {
       inProgressByAgentId.set(agentId, (inProgressByAgentId.get(agentId) || 0) + cnt);
     }
 
+    // Optional: Pipecat service activeSessionCount gating (cached).
+    const reservedByServiceName = new Map();
+    const pipecatCapacityByServiceName = new Map();
+    const loggedFullServices = new Set();
+
+    if (DIALER_PIPECAT_ACTIVE_SESSION_GATING && PIPECAT_API_KEY) {
+      try {
+        const serviceNames = Array.from(new Set(
+          campaignRows
+            .map(r => String(r.pipecat_agent_name || '').trim())
+            .filter(Boolean)
+        ));
+
+        if (serviceNames.length) {
+          await Promise.all(serviceNames.map(async (svc) => {
+            const info = await getPipecatServiceCapacityInfo(svc);
+            if (info) pipecatCapacityByServiceName.set(svc, info);
+          }));
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[dialer.gating] Failed to prefetch Pipecat service status:', e?.message || e);
+      }
+    }
+
     for (const c of campaignRows) {
       const campaignId = Number(c.id);
       const userId = Number(c.user_id);
@@ -9620,8 +9785,35 @@ async function runDialerWorkerTick() {
 
       const availableCampaign = Math.max(0, concurrency - inProgressCampaign);
       const availableAgent = agentId ? Math.max(0, DIALER_MAX_CONCURRENCY_PER_AGENT - inProgressAgent) : availableCampaign;
-      const available = Math.max(0, Math.min(availableCampaign, availableAgent));
+
+      let available = Math.max(0, Math.min(availableCampaign, availableAgent));
       if (!available) continue;
+
+      const serviceName = String(c.pipecat_agent_name || '').trim();
+      if (available && DIALER_PIPECAT_ACTIVE_SESSION_GATING && PIPECAT_API_KEY && serviceName) {
+        const cap = pipecatCapacityByServiceName.get(serviceName);
+        if (cap && Number.isFinite(cap.effectiveMax)) {
+          const reserved = Number(reservedByServiceName.get(serviceName) || 0);
+          const availableService = Math.max(
+            0,
+            Number(cap.effectiveMax || 0) - Number(cap.activeSessionCount || 0) - reserved
+          );
+
+          available = Math.max(0, Math.min(available, availableService));
+          if (!available) {
+            if (DEBUG && !loggedFullServices.has(serviceName)) {
+              loggedFullServices.add(serviceName);
+              console.log('[dialer.gating] Pipecat service at capacity; skipping scheduling', {
+                serviceName,
+                activeSessionCount: cap.activeSessionCount,
+                effectiveMax: cap.effectiveMax,
+                headroom: DIALER_PIPECAT_CAPACITY_HEADROOM
+              });
+            }
+            continue;
+          }
+        }
+      }
 
       const limit = Math.min(available, DIALER_MAX_CONCURRENCY);
       const [leads] = await pool.query(
@@ -9648,6 +9840,9 @@ async function runDialerWorkerTick() {
         inProgressByCampaignId.set(campaignId, (Number(inProgressByCampaignId.get(campaignId) || 0) + 1));
         if (agentId) {
           inProgressByAgentId.set(agentId, (Number(inProgressByAgentId.get(agentId) || 0) + 1));
+        }
+        if (DIALER_PIPECAT_ACTIVE_SESSION_GATING && PIPECAT_API_KEY && serviceName) {
+          reservedByServiceName.set(serviceName, (Number(reservedByServiceName.get(serviceName) || 0) + 1));
         }
 
         const startRes = await startDialerLeadCall({ campaign: c, lead });

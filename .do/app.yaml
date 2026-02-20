@@ -98,6 +98,12 @@ services:
         value: "0.015"
       - key: DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE
         value: "0"
+      - key: DIALER_PIPECAT_ACTIVE_SESSION_GATING
+        value: "1"
+      - key: PIPECAT_SERVICE_STATUS_CACHE_MS
+        value: "2000"
+      - key: DIALER_PIPECAT_CAPACITY_HEADROOM
+        value: "0"
 
       # ── Provider API keys ──
       - key: DEEPGRAM_API_KEY
