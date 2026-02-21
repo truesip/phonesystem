@@ -110,6 +110,8 @@ services:
         value: "40"
       - key: DIALER_GLOBAL_MAX_DIALOUT
         value: "40"
+      - key: DIALER_MIN_CREDIT
+        value: "0"
 
       # ── Provider API keys ──
       - key: DEEPGRAM_API_KEY

@@ -121,6 +121,8 @@ const DIALER_PIPECAT_CAPACITY_HEADROOM = Math.max(0, parseInt(process.env.DIALER
 // Optional global cap across all campaigns to avoid hitting Pipecat/Daily dial-out limits.
 // 0 disables the global cap (per-campaign concurrency only).
 const DIALER_GLOBAL_MAX_DIALOUT = Math.max(0, parseInt(process.env.DIALER_GLOBAL_MAX_DIALOUT || '0', 10) || 0);
+// Minimum credit required to run Auto Dialer campaigns. Defaults to 0 (pause when balance goes negative).
+const DIALER_MIN_CREDIT = parseFloat(process.env.DIALER_MIN_CREDIT || '0') || 0;
 
 function clampDialerConcurrencyLimit(raw) {
   const n = parseInt(String(raw ?? ''), 10);
@@ -8790,6 +8792,23 @@ app.patch('/api/me/dialer/campaigns/:campaignId/status', requireAuth, async (req
     if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
 
     if (action === 'start') {
+      // Balance gate: prevent starting campaigns when the user's balance is below the minimum credit.
+      let credit = null;
+      try {
+        credit = await getUserBalance(userId);
+        credit = Number.isFinite(credit) ? Number(credit) : null;
+      } catch (e) {
+        if (DEBUG) console.warn('[dialer.campaigns.status] Failed to fetch balance:', e?.message || e);
+        credit = null;
+      }
+
+      if (credit != null && credit < DIALER_MIN_CREDIT) {
+        return res.status(402).json({
+          success: false,
+          message: 'Insufficient balance to start Auto Dialer campaign. Please add funds and try again.'
+        });
+      }
+
       const [leadRows] = await pool.execute(
         `SELECT COUNT(*) AS cnt FROM dialer_leads
          WHERE campaign_id = ? AND user_id = ? AND status IN ('pending','queued','dialing')`,
@@ -9769,7 +9788,58 @@ async function runDialerWorkerTick() {
        LIMIT 200`
     );
 
-    const campaignRows = Array.isArray(campaigns) ? campaigns : [];
+    let campaignRows = Array.isArray(campaigns) ? campaigns : [];
+
+    // Auto-pause campaigns for users whose balance is below the dialer minimum credit.
+    if (campaignRows.length && DIALER_MIN_CREDIT !== null) {
+      try {
+        const userIds = Array.from(new Set(
+          campaignRows
+            .map(c => Number(c.user_id))
+            .filter(uid => Number.isFinite(uid) && uid > 0)
+        ));
+
+        const creditByUserId = new Map();
+        for (const uid of userIds) {
+          try {
+            const credit = await getUserBalance(uid);
+            if (Number.isFinite(credit)) {
+              creditByUserId.set(uid, Number(credit));
+            }
+          } catch (e) {
+            if (DEBUG) console.warn('[dialer.worker] Failed to fetch balance for user', uid, e?.message || e);
+          }
+        }
+
+        const usersToPause = userIds.filter(uid => {
+          const credit = creditByUserId.get(uid);
+          return credit != null && credit < DIALER_MIN_CREDIT;
+        });
+
+        if (usersToPause.length) {
+          try {
+            const [res] = await pool.query(
+              `UPDATE dialer_campaigns
+               SET status = 'paused', last_paused_at = NOW(), updated_at = NOW()
+               WHERE status = 'running' AND user_id IN (?)`,
+              [usersToPause]
+            );
+            if (DEBUG) console.log('[dialer.worker] Auto-paused campaigns due to low balance', {
+              userIds: usersToPause,
+              affected: res?.affectedRows
+            });
+          } catch (e) {
+            if (DEBUG) console.warn('[dialer.worker] Failed to auto-pause campaigns due to low balance:', e?.message || e);
+          }
+
+          // Filter out campaigns we just paused so we don't schedule new calls for them.
+          campaignRows = campaignRows.filter(c => !usersToPause.includes(Number(c.user_id)));
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[dialer.worker] Auto-pause check failed:', e?.message || e);
+      }
+    }
+
     const campaignIds = campaignRows.map(c => Number(c.id)).filter(Boolean);
 
     // Compute in-progress calls per campaign.
