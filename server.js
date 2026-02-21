@@ -4206,12 +4206,32 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
     const allowedSorts = ['id', 'username', 'email', 'created_at', 'is_admin', 'suspended'];
     const sortCol = allowedSorts.includes(sortBy) ? sortBy : 'created_at';
     
+    // Build WHERE clause dynamically to support searching by username/email/name
+    // and by AI phone number (ai_numbers.phone_number) using digits-only matching.
     let whereClause = '';
     const params = [];
     if (search) {
-      whereClause = 'WHERE username LIKE ? OR email LIKE ? OR firstname LIKE ? OR lastname LIKE ?';
+      const whereParts = [];
       const searchPattern = `%${search}%`;
+      // Username / email / name search
+      whereParts.push('(username LIKE ? OR email LIKE ? OR firstname LIKE ? OR lastname LIKE ?)');
       params.push(searchPattern, searchPattern, searchPattern, searchPattern);
+
+      // Optional: AI phone number search (digits-only)
+      const digits = search.replace(/[^0-9]/g, '');
+      if (digits && digits.length >= 4) {
+        // Match any AI number for this user where the digits-only phone contains the search digits.
+        whereParts.push(`EXISTS (
+          SELECT 1 FROM ai_numbers n
+          WHERE n.user_id = signup_users.id
+            AND REGEXP_REPLACE(n.phone_number, '[^0-9]', '') LIKE ?
+        )`);
+        params.push(`%${digits}%`);
+      }
+
+      if (whereParts.length) {
+        whereClause = 'WHERE ' + whereParts.join(' OR ');
+      }
     }
     
     const [[countResult]] = await pool.execute(
