@@ -238,15 +238,68 @@
     /* Empty state */
     .empty-state{text-align:center;padding:30px;color:var(--muted2)}
 
+    /* Mobile header/navigation */
+    .mobile-nav{
+      display:none;
+      position:sticky;
+      top:0;
+      z-index:40;
+      background:rgba(248,249,250,0.98);
+      backdrop-filter:blur(6px);
+      border-bottom:1px solid rgba(0,0,0,.08);
+      padding:8px 10px;
+      display:flex;
+      align-items:center;
+      gap:8px;
+    }
+    .mobile-nav-title{
+      font-weight:700;
+      font-size:14px;
+      white-space:nowrap;
+    }
+    .mobile-nav select{
+      flex:1;
+      min-width:0;
+    }
+    .mobile-nav a{
+      font-size:12px;
+      white-space:nowrap;
+      color:var(--muted);
+    }
+
     /* Responsive */
-    @media(max-width:768px){
+    @media(max-width:900px){
+      .wrap{flex-direction:column;}
       aside{display:none}
+      .mobile-nav{display:flex}
+      main{padding:10px;}
+      main > section{padding:10px 10px;margin-bottom:12px;}
       .kpi-grid{grid-template-columns:repeat(2,1fr)}
+      .toolbar{flex-direction:column;align-items:stretch}
+      .toolbar input[type="search"],
+      .toolbar button{width:100%}
+      table{font-size:12px}
+      th,td{padding:6px 4px}
+      .detail-row{flex-direction:column}
+      .detail-label{min-width:0}
+      .modal{width:calc(100% - 24px);max-width:100%;padding:16px}
     }
   </style>
 </head>
 <body>
 <div id="appRoot">
+  <div class="mobile-nav">
+    <div class="mobile-nav-title">Admin</div>
+    <select id="mobileSectionSelect" onchange="showSection(this.value)">
+      <option value="overview">Overview</option>
+      <option value="users">Users</option>
+      <option value="financial">Financial</option>
+      <option value="telephony">Telephony</option>
+      <option value="ai">AI Platform</option>
+      <option value="integrations">Integrations</option>
+    </select>
+    <a href="/dashboard">Back</a>
+  </div>
   <div class="wrap">
     <aside>
       <a href="#overview" onclick="showSection('overview');return false" class="active" data-section="overview">📊 Overview</a>
@@ -361,6 +414,9 @@ function showSection(id) {
   document.querySelectorAll('aside a[data-section]').forEach(function(a) { a.classList.remove('active'); });
   var link = document.querySelector('aside a[data-section="' + id + '"]');
   if (link) link.classList.add('active');
+  // Keep mobile section selector in sync
+  var sel = document.getElementById('mobileSectionSelect');
+  if (sel) sel.value = id;
 }
 
 // Format currency
