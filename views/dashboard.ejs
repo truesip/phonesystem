@@ -952,7 +952,7 @@
     <aside>
       <a href="#overview" id="tab-overview" class="active"><img class="nav-icon" src="/Icon/Overview.ico" alt="" aria-hidden="true"><span>Overview</span></a>
       <a href="#ai" id="tab-ai"><img class="nav-icon" src="/Icon/AI%20Agent.ico" alt="" aria-hidden="true"><span>AI Agent</span></a>
-      <a href="#dialer" id="tab-dialer"><img class="nav-icon" src="/Icon/Outbound-Dialer.ico" alt="" aria-hidden="true"><span>Outbound Dialer</span></a>
+      <a href="#dialer" id="tab-dialer"><img class="nav-icon" src="/Icon/Outbound-Dialer.ico" alt="" aria-hidden="true"><span>Auto Dialer</span></a>
       <a href="#cdr" id="tab-cdr"><img class="nav-icon" src="/Icon/Call%20History.ico" alt="" aria-hidden="true"><span>Call History</span></a>
       <a href="#billing" id="tab-billing"><img class="nav-icon" src="/Icon/Billing%20History.ico" alt="" aria-hidden="true"><span>Billing History</span></a>
       <a href="#profile" id="tab-profile"><img class="nav-icon" src="/Icon/Profile.ico" alt="" aria-hidden="true"><span>Profile</span></a>
@@ -1057,7 +1057,7 @@
         <div id="cdr-empty" class="muted">Loading…</div>
       </section>
       <section id="view-dialer" style="display:none">
-        <h2>Outbound Dialer</h2>
+        <h2>Auto Dialer</h2>
         <div class="muted" style="margin-bottom:10px">
           Launch AI-powered outbound campaigns: pick an AI agent, upload leads from CSV,
           then start, pause, or complete the run while tracking answer/voicemail/transfer metrics.
@@ -2385,7 +2385,7 @@
     tabs.ai.addEventListener('click',e=>{e.preventDefault();activate('ai');activateAiSubtab('agents');loadAiAgents();loadAiNumbers();});
     tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdr();});
 
-    // ========== Outbound Dialer ==========
+    // ========== Auto Dialer ==========
     let dialerUiInit = false;
     let dialerCampaigns = [];
     let dialerPage = 0;
