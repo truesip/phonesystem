@@ -9214,10 +9214,30 @@ app.get('/api/me/dialer/campaigns/:campaignId/leads-by-status', requireAuth, asy
       total = countRow?.cnt ? Number(countRow.cnt) : 0;
       
       [rows] = await pool.query(
-        `SELECT id, phone_number, lead_name, status, attempt_count, last_call_at, created_at
-         FROM dialer_leads
-         WHERE campaign_id = ? AND user_id = ? AND status IN (${placeholders})
-         ORDER BY last_call_at DESC, created_at DESC
+        `SELECT l.id,
+                l.phone_number,
+                l.lead_name,
+                l.status,
+                l.attempt_count,
+                l.last_call_at,
+                l.created_at,
+                (
+                  SELECT c.result
+                  FROM dialer_call_logs c
+                  WHERE c.lead_id = l.id
+                  ORDER BY c.id DESC
+                  LIMIT 1
+                ) AS call_result,
+                (
+                  SELECT c.duration_sec
+                  FROM dialer_call_logs c
+                  WHERE c.lead_id = l.id
+                  ORDER BY c.id DESC
+                  LIMIT 1
+                ) AS duration_sec
+         FROM dialer_leads l
+         WHERE l.campaign_id = ? AND l.user_id = ? AND l.status IN (${placeholders})
+         ORDER BY l.last_call_at DESC, l.created_at DESC
          LIMIT ${Number(pageSize)} OFFSET ${Number(offset)}`,
         [campaignId, userId, ...whereStatus]
       );
@@ -9230,10 +9250,30 @@ app.get('/api/me/dialer/campaigns/:campaignId/leads-by-status', requireAuth, asy
       total = countRow?.cnt ? Number(countRow.cnt) : 0;
       
       [rows] = await pool.query(
-        `SELECT id, phone_number, lead_name, status, attempt_count, last_call_at, created_at
-         FROM dialer_leads
-         WHERE campaign_id = ? AND user_id = ?
-         ORDER BY last_call_at DESC, created_at DESC
+        `SELECT l.id,
+                l.phone_number,
+                l.lead_name,
+                l.status,
+                l.attempt_count,
+                l.last_call_at,
+                l.created_at,
+                (
+                  SELECT c.result
+                  FROM dialer_call_logs c
+                  WHERE c.lead_id = l.id
+                  ORDER BY c.id DESC
+                  LIMIT 1
+                ) AS call_result,
+                (
+                  SELECT c.duration_sec
+                  FROM dialer_call_logs c
+                  WHERE c.lead_id = l.id
+                  ORDER BY c.id DESC
+                  LIMIT 1
+                ) AS duration_sec
+         FROM dialer_leads l
+         WHERE l.campaign_id = ? AND l.user_id = ?
+         ORDER BY l.last_call_at DESC, l.created_at DESC
          LIMIT ${Number(pageSize)} OFFSET ${Number(offset)}`,
         [campaignId, userId]
       );
