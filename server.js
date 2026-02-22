@@ -14371,8 +14371,8 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
     // update it with the final invoice-based description immediately afterwards.
     const manualPlaceholderDesc = 'Pending manual refill';
     const [insertResult] = await pool.execute(
-      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, manualPlaceholderDesc, 'pending']
+      'INSERT INTO billing_history (user_id, amount, description, balance_before, balance_after, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, amountNum, manualPlaceholderDesc, 0, 0, 'pending']
     );
     const billingId = insertResult.insertId;
 
@@ -14438,8 +14438,8 @@ app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
     // update it with the final invoice-based description immediately afterwards.
     const cryptoPlaceholderDesc = 'Pending crypto refill';
     const [insertResult] = await pool.execute(
-      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, cryptoPlaceholderDesc, 'pending']
+      'INSERT INTO billing_history (user_id, amount, description, balance_before, balance_after, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, amountNum, cryptoPlaceholderDesc, 0, 0, 'pending']
     );
     const billingId = insertResult.insertId;
 
@@ -14553,8 +14553,8 @@ async function handleBillcomCheckout(req, res) {
     // update it with the final invoice-based description immediately afterwards.
     const achPlaceholderDesc = 'Pending ACH refill';
     const [insertResult] = await pool.execute(
-      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, achPlaceholderDesc, 'pending']
+      'INSERT INTO billing_history (user_id, amount, description, balance_before, balance_after, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, amountNum, achPlaceholderDesc, 0, 0, 'pending']
     );
     billingId = insertResult.insertId;
 
@@ -14696,8 +14696,8 @@ async function handleSquareCheckout(req, res) {
     // update it with the final invoice-based description immediately afterwards.
     const squarePlaceholderDesc = 'Pending card refill (Square)';
     const [insertResult] = await pool.execute(
-      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, squarePlaceholderDesc, 'pending']
+      'INSERT INTO billing_history (user_id, amount, description, balance_before, balance_after, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, amountNum, squarePlaceholderDesc, 0, 0, 'pending']
     );
     const billingId = insertResult.insertId;
 
@@ -14829,8 +14829,8 @@ async function handleStripeCheckout(req, res) {
     // update it with the final invoice-based description immediately afterwards.
     const stripePlaceholderDesc = 'Pending card refill (Stripe)';
     const [insertResult] = await pool.execute(
-      'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, stripePlaceholderDesc, 'pending']
+      'INSERT INTO billing_history (user_id, amount, description, balance_before, balance_after, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, amountNum, stripePlaceholderDesc, 0, 0, 'pending']
     );
     billingId = insertResult.insertId;
 
