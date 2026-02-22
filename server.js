@@ -960,6 +960,127 @@ async function creditBalance(userId, amount, description, paymentMethod, referen
   return await updateUserBalance(userId, Math.abs(amount), description, 'credit', paymentMethod, referenceId);
 }
 
+async function completeBillingInvoice({ userId, billingId, paymentMethod, referenceId, descriptionOverride, transactionType = 'credit' }) {
+  if (!pool) throw new Error('Database not configured');
+  const conn = await pool.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    // Lock user row to serialize balance changes (same pattern as updateUserBalance)
+    const [userRows] = await conn.query(
+      'SELECT id, suspended FROM signup_users WHERE id = ? FOR UPDATE',
+      [userId]
+    );
+    if (!userRows || userRows.length === 0) {
+      throw new Error('User not found');
+    }
+    if (userRows[0].suspended) {
+      throw new Error('User account is suspended');
+    }
+
+    // Lock and load the invoice row itself
+    const [billingRows] = await conn.query(
+      'SELECT id, user_id, amount, status, description, balance_before, balance_after FROM billing_history WHERE id = ? FOR UPDATE',
+      [billingId]
+    );
+    if (!billingRows || billingRows.length === 0) {
+      throw new Error('Invoice not found');
+    }
+    const billing = billingRows[0];
+    if (String(billing.user_id) !== String(userId)) {
+      throw new Error('Invoice/user mismatch');
+    }
+
+    // If already completed, treat as idempotent success
+    if (billing.status === 'completed') {
+      const before = billing.balance_before != null ? Number(billing.balance_before) : null;
+      const after = billing.balance_after != null ? Number(billing.balance_after) : null;
+      await conn.commit();
+      return {
+        success: true,
+        alreadyCompleted: true,
+        billingId: billing.id,
+        balanceBefore: before,
+        balanceAfter: after
+      };
+    }
+
+    const amount = Number(billing.amount || 0);
+    if (!(amount > 0)) {
+      throw new Error('Invoice amount must be positive for credit');
+    }
+
+    // Compute current balance from completed rows (this invoice is still pending)
+    const [balanceRows] = await conn.query(
+      "SELECT COALESCE(SUM(amount), 0) AS balance FROM billing_history WHERE user_id = ? AND status = 'completed'",
+      [userId]
+    );
+    const balanceBefore = parseFloat(balanceRows[0]?.balance || 0);
+    const balanceAfter = balanceBefore + amount;
+
+    const finalDescription = (descriptionOverride && String(descriptionOverride).trim())
+      ? String(descriptionOverride).substring(0, 255)
+      : (billing.description ? String(billing.description).substring(0, 255) : null);
+
+    const [upd] = await conn.query(
+      `UPDATE billing_history
+         SET status = 'completed',
+             transaction_type = ?,
+             payment_method = COALESCE(?, payment_method),
+             reference_id = COALESCE(?, reference_id),
+             balance_before = ?,
+             balance_after = ?,
+             description = COALESCE(?, description)
+       WHERE id = ? AND user_id = ?`,
+      [
+        transactionType || 'credit',
+        paymentMethod || null,
+        referenceId || null,
+        balanceBefore,
+        balanceAfter,
+        finalDescription,
+        billingId,
+        userId
+      ]
+    );
+
+    if (!upd.affectedRows) {
+      throw new Error('Failed to update invoice row');
+    }
+
+    await conn.commit();
+    if (DEBUG) {
+      console.log('[completeBillingInvoice]', {
+        userId,
+        billingId,
+        amount,
+        paymentMethod,
+        referenceId,
+        balanceBefore,
+        balanceAfter
+      });
+    }
+
+    return {
+      success: true,
+      alreadyCompleted: false,
+      billingId,
+      amount,
+      balanceBefore,
+      balanceAfter
+    };
+  } catch (err) {
+    try {
+      await conn.rollback();
+    } catch {}
+    console.error('[completeBillingInvoice] Error:', err);
+    return { success: false, error: err.message || String(err) };
+  } finally {
+    conn.release();
+  }
+}
+
 async function storeCdr(userIdOrPayload, direction, srcNumber, dstNumber, didNumber, timeStart, timeEnd, duration, billsec, price, status, aiAgentId, campaignId, sessionId) {
   try {
     if (!pool) throw new Error('Database not configured');
@@ -3455,6 +3576,58 @@ async function sendRefillReceiptEmail({ toEmail, username, amount, description, 
   await smtp2goSendEmail(payload, { kind: 'refill-receipt', to: toEmail, subject });
 }
 
+// Helper: send a refill receipt email for a completed billing_history row
+// identified by its primary key. Safe to call multiple times; it only sends
+// when the row exists and has status = 'completed' and the user has an email.
+async function sendRefillReceiptForBillingId(billingId) {
+  try {
+    if (!pool) return { ok: false, reason: 'no_pool' };
+    const idNum = Number(billingId);
+    if (!Number.isFinite(idNum) || idNum <= 0) return { ok: false, reason: 'invalid_billing_id' };
+
+    const [rows] = await pool.execute(
+      `SELECT bh.id, bh.user_id, bh.amount, bh.description, bh.payment_method, bh.reference_id, bh.status,
+              u.username, u.email
+         FROM billing_history bh
+         JOIN signup_users u ON u.id = bh.user_id
+        WHERE bh.id = ?
+        LIMIT 1`,
+      [idNum]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row) return { ok: false, reason: 'not_found' };
+    if (row.status !== 'completed') return { ok: false, reason: 'not_completed' };
+
+    const toEmail = String(row.email || '').trim();
+    if (!toEmail) {
+      if (DEBUG) console.warn('[sendRefillReceiptForBillingId] Missing email for user', row.user_id);
+      return { ok: false, reason: 'no_email' };
+    }
+
+    await sendRefillReceiptEmail({
+      toEmail,
+      username: row.username || '',
+      amount: row.amount,
+      description: row.description || '',
+      invoiceNumber: row.id,
+      paymentMethod: row.payment_method || '',
+      processorTransactionId: row.reference_id || ''
+    });
+
+    if (DEBUG) {
+      console.log('[sendRefillReceiptForBillingId] Sent refill receipt', {
+        billingId: idNum,
+        toEmail
+      });
+    }
+
+    return { ok: true };
+  } catch (e) {
+    console.error('[sendRefillReceiptForBillingId] Error:', e?.message || e);
+    return { ok: false, reason: e?.message || String(e) };
+  }
+}
+
 // Send a DID purchase receipt email when new numbers are purchased
 // NOTE: This email only shows Phone.System markup monthly pricing, not wholesale amounts.
 async function sendDidPurchaseReceiptEmail({ toEmail, displayName, items, totalAmount, orderReference }) {
@@ -4480,6 +4653,40 @@ app.post('/api/admin/users/:id/adjust-balance', requireAdmin, async (req, res) =
   } catch (e) {
     console.error('[admin.adjust-balance] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to adjust balance' });
+  }
+});
+
+// Admin API: Resend refill receipt email for a given billing_history id
+app.post('/api/admin/billing/:billingId/resend-receipt', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const billingIdRaw = req.params.billingId;
+    const billingIdNum = Number(billingIdRaw);
+    if (!Number.isFinite(billingIdNum) || billingIdNum <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid billing id' });
+    }
+
+    const result = await sendRefillReceiptForBillingId(billingIdNum);
+
+    if (!result || result.ok !== true) {
+      const reason = result?.reason || 'Failed to send receipt';
+      if (reason === 'not_found') {
+        return res.status(404).json({ success: false, message: 'Billing record not found' });
+      }
+      if (reason === 'not_completed') {
+        return res.status(400).json({ success: false, message: 'Billing record is not completed' });
+      }
+      if (reason === 'no_email') {
+        return res.status(400).json({ success: false, message: 'User has no email on file for receipts' });
+      }
+      return res.status(500).json({ success: false, message: `Failed to send receipt: ${reason}` });
+    }
+
+    return res.json({ success: true, message: 'Refill receipt email resent (if deliverable)' });
+  } catch (e) {
+    console.error('[admin.billing.resend-receipt] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to resend receipt' });
   }
 });
 
@@ -14364,11 +14571,10 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
     const fullName = `${firstName || ''} ${lastName || ''}`.trim();
     const displayName = fullName || baseUser;
 
-    const paymentMethod = 'Manual';
+    const paymentMethod = 'manual';
 
-    // Insert pending billing record. billing_history.id is our invoice number.
-    // Use a non-null placeholder description to satisfy NOT NULL constraint; we'll
-    // update it with the final invoice-based description immediately afterwards.
+    // 1) Insert pending billing record. billing_history.id is our invoice number.
+    // We use a placeholder description here; completeBillingInvoice will overwrite it.
     const manualPlaceholderDesc = 'Pending manual refill';
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, balance_before, balance_after, status) VALUES (?, ?, ?, ?, ?, ?)',
@@ -14376,17 +14582,31 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
     );
     const billingId = insertResult.insertId;
 
+    // 2) Build final invoice-style description (e.g. "A.I Service Credit ... Invoice Number <id>")
     const desc = buildRefillDescription(billingId);
-    try {
-      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]);
-    } catch {}
 
-    const result = await creditBalance(userId, amountNum, desc);
+    // 3) Complete the existing invoice row in-place (no separate creditBalance row).
+    const result = await completeBillingInvoice({
+      userId,
+      billingId,
+      paymentMethod,
+      referenceId: null,              // No external provider reference for manual refills
+      descriptionOverride: desc,      // Overwrite placeholder with final invoice description
+      transactionType: 'credit'
+    });
 
-    if (result.success) {
+    if (result && result.success) {
+      // Best-effort send refill receipt email; do not block success on failures.
+      try {
+        await sendRefillReceiptForBillingId(billingId);
+      } catch (e) {
+        if (DEBUG) console.warn('[add-funds] Failed to send refill receipt:', e.message || e);
+      }
       return res.json({ success: true, message: 'Funds added successfully' });
     }
-    return res.status(500).json({ success: false, message: 'Failed to add credit: ' + (result.error || 'Unknown error') });
+
+    const errMsg = result?.error || 'Unknown error';
+    return res.status(500).json({ success: false, message: 'Failed to add credit: ' + errMsg });
   } catch (e) {
     if (DEBUG) console.error('[add-funds] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to add funds' });
@@ -15075,21 +15295,27 @@ app.post('/nowpayments/ipn', async (req, res) => {
       return res.status(200).json({ success: true, alreadyCredited: true });
     }
 
-    // Use the amount from billing_history as source of truth (what we asked customer to pay)
-    const amountNum = Number(billing.amount || priceAmount || 0);
     const desc = billing.description || p.order_description || `Crypto payment for order ${orderId}`;
 
-    // Credit local balance
-    const creditResult = await creditBalance(
+    // Complete the existing invoice row in billing_history (no separate creditBalance row).
+    const completeResult = await completeBillingInvoice({
       userId,
-      amountNum,
-      desc,
-      'crypto',
-      remotePaymentId || 'N/A'
-    );
+      billingId,
+      paymentMethod: 'crypto',
+      referenceId: remotePaymentId || 'N/A',
+      descriptionOverride: desc,
+      transactionType: 'credit'
+    });
 
-    if (!creditResult.success) {
-      if (DEBUG) console.error('[nowpayments.ipn] Failed to credit local balance for order:', { orderId, error: creditResult.error });
+    if (!completeResult.success) {
+      if (DEBUG) {
+        console.error('[nowpayments.ipn] Failed to complete billing invoice for order:', {
+          orderId,
+          billingId,
+          userId,
+          error: completeResult.error
+        });
+      }
       // Release the processing lock so a future IPN can retry.
       try {
         await pool.execute(
@@ -15099,17 +15325,7 @@ app.post('/nowpayments/ipn', async (req, res) => {
       } catch (e) {
         if (DEBUG) console.warn('[nowpayments.ipn] Failed to revert credited flag after error:', e.message || e);
       }
-      return res.status(500).json({ success: false, message: 'Failed to credit balance' });
-    }
-
-    // Mark billing_history as completed
-    try {
-      await pool.execute(
-        'UPDATE billing_history SET status = ? WHERE id = ?',
-        ['completed', billingId]
-      );
-    } catch (e) {
-      if (DEBUG) console.warn('[nowpayments.ipn] Failed to mark billing as completed:', e.message || e);
+      return res.status(500).json({ success: false, message: 'Failed to complete billing' });
     }
 
     // Mark as credited
@@ -15120,6 +15336,13 @@ app.post('/nowpayments/ipn', async (req, res) => {
       );
     } catch (e) {
       if (DEBUG) console.warn('[nowpayments.ipn] Failed to mark payment as credited:', e.message || e);
+    }
+
+    // Best-effort: send refill receipt email for this invoice.
+    try {
+      await sendRefillReceiptForBillingId(billingId);
+    } catch (e) {
+      if (DEBUG) console.warn('[nowpayments.ipn] Failed to send refill receipt:', e.message || e);
     }
 
     if (DEBUG) console.log('[nowpayments.ipn] Successfully credited order:', { orderId, billingId, userId });
@@ -15288,22 +15511,28 @@ app.post('/webhooks/square', async (req, res) => {
       return res.status(200).json({ success: true, alreadyCredited: true });
     }
 
-    // Use the amount from billing_history as source of truth (what we asked customer to pay)
-    const amountNum = Number(billing.amount || 0);
     const desc = billing.description || `Square payment for order ${localOrderId}`;
     const paymentId = String(payment.id || sq.square_payment_id || '').trim() || 'N/A';
 
-    // Credit local balance
-    const creditResult = await creditBalance(
+    // Complete the existing invoice row in billing_history (no separate creditBalance row).
+    const completeResult = await completeBillingInvoice({
       userId,
-      amountNum,
-      desc,
-      'card',
-      paymentId
-    );
+      billingId,
+      paymentMethod: 'card',
+      referenceId: paymentId,
+      descriptionOverride: desc,
+      transactionType: 'credit'
+    });
 
-    if (!creditResult.success) {
-      if (DEBUG) console.error('[square.webhook] Failed to credit local balance for order:', { localOrderId, error: creditResult.error });
+    if (!completeResult.success) {
+      if (DEBUG) {
+        console.error('[square.webhook] Failed to complete billing invoice for order:', {
+          localOrderId,
+          billingId,
+          userId,
+          error: completeResult.error
+        });
+      }
       // Release the processing lock so a future retry can attempt again.
       try {
         await pool.execute(
@@ -15313,17 +15542,7 @@ app.post('/webhooks/square', async (req, res) => {
       } catch (e) {
         if (DEBUG) console.warn('[square.webhook] Failed to revert credited flag after error:', e.message || e);
       }
-      return res.status(500).json({ success: false, message: 'Failed to credit balance' });
-    }
-
-    // Mark billing_history as completed
-    try {
-      await pool.execute(
-        'UPDATE billing_history SET status = ? WHERE id = ?',
-        ['completed', billingId]
-      );
-    } catch (e) {
-      if (DEBUG) console.warn('[square.webhook] Failed to mark billing as completed:', e.message || e);
+      return res.status(500).json({ success: false, message: 'Failed to complete billing' });
     }
 
     // Mark as credited and save latest payload
@@ -15334,6 +15553,13 @@ app.post('/webhooks/square', async (req, res) => {
       );
     } catch (e) {
       if (DEBUG) console.warn('[square.webhook] Failed to mark payment as credited:', e.message || e);
+    }
+
+    // Best-effort: send refill receipt email for this invoice.
+    try {
+      await sendRefillReceiptForBillingId(billingId);
+    } catch (e) {
+      if (DEBUG) console.warn('[square.webhook] Failed to send refill receipt:', e.message || e);
     }
 
     if (DEBUG) console.log('[square.webhook] Successfully credited order:', { localOrderId, billingId, userId });
@@ -15526,21 +15752,27 @@ app.post('/webhooks/stripe', async (req, res) => {
       return res.status(200).json({ success: true, alreadyCredited: true });
     }
 
-    // Use amount from billing_history as source of truth
-    const amountNum = Number(billing.amount || 0);
     const desc = billing.description || `Stripe payment for order ${orderId}`;
 
-    // Credit local balance
-    const creditResult = await creditBalance(
+    // Complete the existing invoice row in billing_history (no separate creditBalance row).
+    const completeResult = await completeBillingInvoice({
       userId,
-      amountNum,
-      desc,
-      'card',
-      paymentIntentId || sessionId
-    );
+      billingId,
+      paymentMethod: 'card',
+      referenceId: paymentIntentId || sessionId,
+      descriptionOverride: desc,
+      transactionType: 'credit'
+    });
 
-    if (!creditResult.success) {
-      if (DEBUG) console.error('[stripe.webhook] Failed to credit local balance for order:', { orderId, error: creditResult.error });
+    if (!completeResult.success) {
+      if (DEBUG) {
+        console.error('[stripe.webhook] Failed to complete billing invoice for order:', {
+          orderId,
+          billingId,
+          userId,
+          error: completeResult.error
+        });
+      }
       // Release the processing lock so a future retry can attempt again.
       try {
         await pool.execute(
@@ -15548,17 +15780,7 @@ app.post('/webhooks/stripe', async (req, res) => {
           ['FAILED', payloadJson, sessionId]
         );
       } catch {}
-      return res.status(500).json({ success: false, message: 'Failed to credit balance' });
-    }
-
-    // Mark billing_history as completed
-    try {
-      await pool.execute(
-        'UPDATE billing_history SET status = ? WHERE id = ?',
-        ['completed', billingId]
-      );
-    } catch (e) {
-      if (DEBUG) console.warn('[stripe.webhook] Failed to mark billing as completed:', e.message || e);
+      return res.status(500).json({ success: false, message: 'Failed to complete billing' });
     }
 
     // Mark as credited
@@ -15569,6 +15791,13 @@ app.post('/webhooks/stripe', async (req, res) => {
       );
     } catch (e) {
       if (DEBUG) console.warn('[stripe.webhook] Failed to mark payment as credited:', e.message || e);
+    }
+
+    // Best-effort: send refill receipt email for this invoice.
+    try {
+      await sendRefillReceiptForBillingId(billingId);
+    } catch (e) {
+      if (DEBUG) console.warn('[stripe.webhook] Failed to send refill receipt:', e.message || e);
     }
 
     if (DEBUG) console.log('[stripe.webhook] Successfully credited order:', { orderId, billingId, userId });
@@ -15756,11 +15985,19 @@ app.post('/webhooks/billcom', async (req, res) => {
     const displayName = fullName || nameBase || 'Customer';
     const userEmail = user.email || '';
 
-    const amountNum = Number(billing.amount || 0);
     const desc = billing.description || buildRefillDescription(billingId);
-    const result = await creditBalance(userId, amountNum, desc, paymentMethod, processorTransactionId);
 
-    if (!result.success) {
+    // Complete the existing invoice row in billing_history (no separate creditBalance row).
+    const completeResult = await completeBillingInvoice({
+      userId,
+      billingId,
+      paymentMethod: 'ach',
+      referenceId: invoiceId || null,
+      descriptionOverride: desc,
+      transactionType: 'credit'
+    });
+
+    if (!completeResult.success) {
       // Release the processing lock so a future retry can attempt again.
       try {
         if (invoiceId) {
@@ -15770,7 +16007,7 @@ app.post('/webhooks/billcom', async (req, res) => {
           );
         }
       } catch {}
-      return res.status(500).json({ success: false, message: 'Failed to credit balance' });
+      return res.status(500).json({ success: false, message: 'Failed to complete billing' });
     }
 
     // Mark as credited
@@ -15782,6 +16019,13 @@ app.post('/webhooks/billcom', async (req, res) => {
         );
       }
     } catch {}
+
+    // Best-effort: send refill receipt email for this invoice.
+    try {
+      await sendRefillReceiptForBillingId(billingId);
+    } catch (e) {
+      if (DEBUG) console.warn('[billcom.webhook] Failed to send refill receipt:', e.message || e);
+    }
 
     return res.status(200).json({ success: true });
   } catch (e) {
