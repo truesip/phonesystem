@@ -14367,9 +14367,12 @@ app.post('/api/me/add-funds', requireAuth, async (req, res) => {
     const paymentMethod = 'Manual';
 
     // Insert pending billing record. billing_history.id is our invoice number.
+    // Use a non-null placeholder description to satisfy NOT NULL constraint; we'll
+    // update it with the final invoice-based description immediately afterwards.
+    const manualPlaceholderDesc = 'Pending manual refill';
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, null, 'pending']
+      [userId, amountNum, manualPlaceholderDesc, 'pending']
     );
     const billingId = insertResult.insertId;
 
@@ -14431,9 +14434,12 @@ app.post('/api/me/nowpayments/checkout', requireAuth, async (req, res) => {
 
     // Insert pending billing record (we will mark completed after successful IPN).
     // billing_history.id is our invoice number.
+    // Use a non-null placeholder description to satisfy NOT NULL constraint; we'll
+    // update it with the final invoice-based description immediately afterwards.
+    const cryptoPlaceholderDesc = 'Pending crypto refill';
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, null, 'pending']
+      [userId, amountNum, cryptoPlaceholderDesc, 'pending']
     );
     const billingId = insertResult.insertId;
 
@@ -14543,9 +14549,12 @@ async function handleBillcomCheckout(req, res) {
 
     // Insert pending billing record (we will mark completed after successful webhook).
     // billing_history.id is our invoice number.
+    // Use a non-null placeholder description to satisfy NOT NULL constraint; we'll
+    // update it with the final invoice-based description immediately afterwards.
+    const achPlaceholderDesc = 'Pending ACH refill';
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, null, 'pending']
+      [userId, amountNum, achPlaceholderDesc, 'pending']
     );
     billingId = insertResult.insertId;
 
@@ -14683,9 +14692,12 @@ async function handleSquareCheckout(req, res) {
 
     // Insert pending billing record (we will mark completed after successful webhook).
     // billing_history.id is our invoice number.
+    // Use a non-null placeholder description to satisfy NOT NULL constraint; we'll
+    // update it with the final invoice-based description immediately afterwards.
+    const squarePlaceholderDesc = 'Pending card refill (Square)';
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, null, 'pending']
+      [userId, amountNum, squarePlaceholderDesc, 'pending']
     );
     const billingId = insertResult.insertId;
 
@@ -14813,9 +14825,12 @@ async function handleStripeCheckout(req, res) {
 
     // Insert pending billing record (we will mark completed after successful webhook).
     // billing_history.id is our invoice number.
+    // Use a non-null placeholder description to satisfy NOT NULL constraint; we'll
+    // update it with the final invoice-based description immediately afterwards.
+    const stripePlaceholderDesc = 'Pending card refill (Stripe)';
     const [insertResult] = await pool.execute(
       'INSERT INTO billing_history (user_id, amount, description, status) VALUES (?, ?, ?, ?)',
-      [userId, amountNum, null, 'pending']
+      [userId, amountNum, stripePlaceholderDesc, 'pending']
     );
     billingId = insertResult.insertId;
 
