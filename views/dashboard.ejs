@@ -1044,6 +1044,7 @@
             <option value="outbound">Outbound Only</option>
           </select>
           <button id="loadCdr">Load</button>
+          <button id="exportCdr">Export CSV</button>
         </div>
         <table id="cdr-table" style="display:none">
           <thead><tr><th>Direction</th><th>Date/Time</th><th>From</th><th>To</th><th>Duration</th><th>Cost</th><th>Status</th></tr></thead>
@@ -7183,6 +7184,42 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
     }
     let cdrPage = 0; const cdrPageSize = 50;
     
+    async function exportCdrCsv(){
+      const from = $('#from').value;
+      const to = $('#to').value;
+      const filter = $('#cdrFilter').value;
+
+      const q = new URLSearchParams();
+      if (from) q.set('from', from);
+      if (to) q.set('to', to);
+      if (filter && filter !== 'all') q.set('direction', filter);
+
+      try {
+        const r = await fetch('/api/me/cdrs/export?' + q.toString(), {
+          method: 'GET'
+        });
+        if (!r.ok) {
+          const text = await r.text();
+          const msg = text || `Export failed (HTTP ${r.status})`;
+          showToast(msg, 'error');
+          return;
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'call-history.csv';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        showToast('Call history exported.');
+      } catch (e) {
+        console.error('[exportCdrCsv]', e);
+        showToast('Failed to export call history', 'error');
+      }
+    }
+
     async function loadCdr(){
       const from = $('#from').value;
       const to = $('#to').value;
@@ -7368,6 +7405,10 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
       }
     })();
     $('#loadCdr').addEventListener('click', e=>{ e.preventDefault(); cdrPage=0; loadCdr(); loadStats(); });
+    const exportBtn = document.getElementById('exportCdr');
+    if (exportBtn) {
+      exportBtn.addEventListener('click', e => { e.preventDefault(); exportCdrCsv(); });
+    }
     document.getElementById('cdrPrev').addEventListener('click', ()=>{ if (cdrPage>0) { cdrPage--; loadCdr(); } });
     document.getElementById('cdrNext').addEventListener('click', ()=>{ cdrPage++; loadCdr(); });
     

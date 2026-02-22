@@ -14115,6 +14115,75 @@ app.get('/api/me/cdrs', requireAuth, async (req, res) => {
   }
 });
 
+// Export CDRs as CSV for the logged-in user (uses same filters as /api/me/cdrs)
+app.get('/api/me/cdrs/export', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).send('Database not configured');
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).send('Not authenticated');
+
+    const fromRaw = (req.query.from || '').toString().trim();
+    const toRaw = (req.query.to || '').toString().trim();
+    const didFilter = (req.query.did || '').toString().trim();
+    const directionFilter = (req.query.direction || '').toString().trim();
+
+    // Export up to 10,000 rows to keep memory usage reasonable.
+    const { rows } = await loadUserCdrTimeline({
+      userId,
+      page: 0,
+      pageSize: 10000,
+      fromRaw,
+      toRaw,
+      didFilter,
+      directionFilter
+    });
+
+    const safeFrom = fromRaw || 'all';
+    const safeTo = toRaw || 'all';
+    const filename = `call-history-${safeFrom}_to_${safeTo}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const header = ['direction', 'datetime', 'from', 'to', 'duration_sec', 'price', 'status'];
+    const escapeCsv = (val) => {
+      const s = val == null ? '' : String(val);
+      if (/[",\n]/.test(s)) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+
+    const lines = [header.join(',')];
+    for (const c of rows || []) {
+      const dir = String(c.direction || 'inbound').toLowerCase();
+      const whenIso = c.timeStart || c.createdAt || null;
+      const dt = whenIso ? new Date(whenIso).toISOString() : '';
+      const src = c.srcNumber || '';
+      const dst = c.dstNumber || c.didNumber || '';
+      const durSec = c.billsec != null ? Number(c.billsec) : (c.duration != null ? Number(c.duration) : 0);
+      const priceNum = c.price != null ? Number(c.price) : null;
+      const status = (c.status != null ? String(c.status) : '').trim() || 'completed';
+
+      const row = [
+        escapeCsv(dir),
+        escapeCsv(dt),
+        escapeCsv(src),
+        escapeCsv(dst),
+        escapeCsv(Number.isFinite(durSec) ? String(durSec) : ''),
+        escapeCsv(priceNum != null && Number.isFinite(priceNum) ? priceNum.toFixed(4) : ''),
+        escapeCsv(status)
+      ];
+      lines.push(row.join(','));
+    }
+
+    res.send(lines.join('\n'));
+  } catch (e) {
+    console.error('[me.cdrs.export] error:', e.message || e);
+    return res.status(500).send('Failed to export CDRs');
+  }
+});
+
 // Debug: CDR health snapshot for the logged-in user (helps diagnose "history not updating")
 app.get('/api/me/cdrs/health', requireAuth, async (req, res) => {
   try {
