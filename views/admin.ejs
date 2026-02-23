@@ -912,7 +912,12 @@ async function adminEnableSelectedAiNumbers(userId) {
   }
   try {
     for (const id of ids) {
-      await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id) + '/enable', { method: 'POST' });
+      var res = await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id) + '/enable', { method: 'POST' });
+      var data = await res.json().catch(function(){ return null; });
+      if (!res.ok || !data || data.success === false) {
+        var msg = (data && data.message) || ('Failed to enable AI number ' + id);
+        throw new Error(msg);
+      }
     }
     showAdminToast('Enable requested for ' + ids.length + ' AI number(s).', 'success');
     viewUser(userId);
@@ -929,7 +934,12 @@ async function adminDisableSelectedAiNumbers(userId) {
   }
   try {
     for (const id of ids) {
-      await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id) + '/disable', { method: 'POST' });
+      var res = await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id) + '/disable', { method: 'POST' });
+      var data = await res.json().catch(function(){ return null; });
+      if (!res.ok || !data || data.success === false) {
+        var msg = (data && data.message) || ('Failed to disable AI number ' + id);
+        throw new Error(msg);
+      }
     }
     showAdminToast('Disable requested for ' + ids.length + ' AI number(s).', 'success');
     viewUser(userId);
@@ -947,7 +957,12 @@ async function adminDeleteSelectedAiNumbers(userId) {
   if (!confirm('Delete ' + ids.length + ' AI number(s)? This will release the numbers and cannot be undone.')) return;
   try {
     for (const id of ids) {
-      await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id), { method: 'DELETE' });
+      var res = await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id), { method: 'DELETE' });
+      var data = await res.json().catch(function(){ return null; });
+      if (!res.ok || !data || data.success === false) {
+        var msg = (data && data.message) || ('Failed to delete AI number ' + id);
+        throw new Error(msg);
+      }
     }
     showAdminToast('Delete requested for ' + ids.length + ' AI number(s).', 'success');
     viewUser(userId);

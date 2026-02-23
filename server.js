@@ -2021,6 +2021,8 @@ async function initDb() {
     { name: 'cancel_billed_to', ddl: "ALTER TABLE ai_numbers ADD COLUMN cancel_billed_to DATETIME NULL" },
     { name: 'cancel_notice_initial_sent_at', ddl: "ALTER TABLE ai_numbers ADD COLUMN cancel_notice_initial_sent_at DATETIME NULL" },
     { name: 'cancel_notice_reminder_sent_at', ddl: "ALTER TABLE ai_numbers ADD COLUMN cancel_notice_reminder_sent_at DATETIME NULL" },
+    // Track last assigned agent so admin disable can detach and enable can reassign.
+    { name: 'last_agent_id', ddl: "ALTER TABLE ai_numbers ADD COLUMN last_agent_id BIGINT NULL AFTER agent_id" },
   ]) {
     try {
       const [rows] = await pool.query(
@@ -4842,7 +4844,8 @@ app.post('/api/admin/ai/numbers/:id/disable', requireAdmin, async (req, res) => 
       }
     }
 
-    await pool.execute('UPDATE ai_numbers SET dialin_config_id = NULL WHERE id = ?', [numberId]);
+    // Admin disable semantics: fully detach from agent and stop routing, while remembering last agent.
+    await pool.execute('UPDATE ai_numbers SET last_agent_id = agent_id, agent_id = NULL, dialin_config_id = NULL WHERE id = ?', [numberId]);
 
     return res.json({ success: true });
   } catch (e) {
@@ -4862,7 +4865,16 @@ app.post('/api/admin/ai/numbers/:id/enable', requireAdmin, async (req, res) => {
     if (!num) return res.status(404).json({ success: false, message: 'AI number not found' });
 
     const userId = num.user_id;
-    if (!num.agent_id) {
+
+    // If admin previously disabled (detached) the number, restore the last agent automatically.
+    let agentId = num.agent_id;
+    if (!agentId && num.last_agent_id) {
+      agentId = num.last_agent_id;
+      await pool.execute('UPDATE ai_numbers SET agent_id = ? WHERE id = ?', [agentId, numberId]);
+      num.agent_id = agentId;
+    }
+
+    if (!agentId) {
       return res.status(400).json({ success: false, message: 'Cannot enable AI number without an assigned agent' });
     }
     if (num.cancel_pending) {
@@ -4878,7 +4890,7 @@ app.post('/api/admin/ai/numbers/:id/enable', requireAdmin, async (req, res) => {
       });
     }
 
-    const [arows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [num.agent_id, userId]);
+    const [arows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [agentId, userId]);
     const agent = arows && arows[0];
     if (!agent) return res.status(404).json({ success: false, message: 'Assigned agent not found' });
 
