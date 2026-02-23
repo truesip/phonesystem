@@ -836,7 +836,15 @@ async function viewUser(id) {
               </div>
             </div>
           `;
-        })() : '<div class="empty-state">No AI numbers for this user. Use \'Buy AI Number\' to purchase one on their behalf.</div>'}
+        })() : `
+          <div class="empty-state">No AI numbers for this user yet.</div>
+          <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
+            <div style="display:flex;gap:6px;align-items:center;font-size:12px;">
+              <input type="text" id="adminBuyAiNumberInput" placeholder="Specific number (optional)" style="max-width:200px">
+              <button class="btn--primary btn--sm" onclick="adminBuyAiNumberForUser(${u.id})">Buy AI Number</button>
+            </div>
+          </div>
+        `}
       </div>
       
       <div class="detail-section">
