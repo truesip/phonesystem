@@ -4656,6 +4656,91 @@ app.post('/api/admin/users/:id/adjust-balance', requireAdmin, async (req, res) =
   }
 });
 
+// Admin API: Redeploy all AI agents for a specific user
+app.post('/api/admin/users/:id/redeploy-ai-agents', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const userId = req.params.id;
+    const [agents] = await pool.execute('SELECT * FROM ai_agents WHERE user_id = ? ORDER BY created_at ASC', [userId]);
+
+    if (!agents || !agents.length) {
+      return res.json({
+        success: true,
+        message: 'No AI agents found for this user',
+        total: 0,
+        succeeded: 0,
+        failed: 0
+      });
+    }
+
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const agent of agents) {
+      try {
+        await redeployPipecatAgentForRow({ agentRow: agent, req, label: 'admin.ai.agents.redeploy.user' });
+        succeeded += 1;
+      } catch (err) {
+        failed += 1;
+        if (DEBUG) console.warn('[admin.redeploy-ai-agents.user] failed', { agentId: agent.id, userId, err: err?.message || err });
+      }
+    }
+
+    const total = agents.length;
+    const msg = failed
+      ? `Redeployed ${succeeded} agent(s); ${failed} failed for user ${userId}`
+      : `Redeployed ${succeeded} agent(s) for user ${userId}`;
+
+    return res.json({ success: true, message: msg, total, succeeded, failed });
+  } catch (e) {
+    console.error('[admin.redeploy-ai-agents.user] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to redeploy AI agents for user' });
+  }
+});
+
+// Admin API: Redeploy all AI agents for all users
+app.post('/api/admin/ai/agents/redeploy-all', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const [agents] = await pool.execute('SELECT * FROM ai_agents ORDER BY user_id ASC, created_at ASC');
+
+    if (!agents || !agents.length) {
+      return res.json({
+        success: true,
+        message: 'No AI agents found to redeploy',
+        total: 0,
+        succeeded: 0,
+        failed: 0
+      });
+    }
+
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const agent of agents) {
+      try {
+        await redeployPipecatAgentForRow({ agentRow: agent, req, label: 'admin.ai.agents.redeploy.all' });
+        succeeded += 1;
+      } catch (err) {
+        failed += 1;
+        if (DEBUG) console.warn('[admin.redeploy-ai-agents.all] failed', { agentId: agent.id, userId: agent.user_id, err: err?.message || err });
+      }
+    }
+
+    const total = agents.length;
+    const msg = failed
+      ? `Redeployed ${succeeded} agent(s); ${failed} failed across all users`
+      : `Redeployed all ${succeeded} agent(s) across all users`;
+
+    return res.json({ success: true, message: msg, total, succeeded, failed });
+  } catch (e) {
+    console.error('[admin.redeploy-ai-agents.all] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to redeploy AI agents across all users' });
+  }
+});
+
 // Admin API: Resend refill receipt email for a given billing_history id
 app.post('/api/admin/billing/:billingId/resend-receipt', requireAdmin, async (req, res) => {
   try {
@@ -10577,6 +10662,67 @@ function assertConfiguredOrThrow(name, val) {
   if (!val) throw new Error(`${name} not configured`);
 }
 
+// Helper: (re)provision Pipecat secret set + agent for an existing ai_agents row
+// Used by both user-level and admin-level redeploy flows.
+async function redeployPipecatAgentForRow({ agentRow, req, label }) {
+  const agent = (agentRow && typeof agentRow === 'object') ? agentRow : null;
+  if (!agent) throw new Error('Missing agentRow');
+
+  const userId = agent.user_id != null ? Number(agent.user_id) : null;
+  const agentId = agent.id != null ? Number(agent.id) : null;
+  if (!userId || !agentId) throw new Error('Agent row missing id or user_id');
+
+  const agentName = String(agent.pipecat_agent_name || '').trim();
+  const secretSetName = String(agent.pipecat_secret_set || '').trim();
+  const region = String(agent.pipecat_region || PIPECAT_REGION || 'us-west');
+
+  if (!agentName || !secretSetName) {
+    throw new Error('Agent not configured');
+  }
+
+  const tag = String(label || 'ai.agents.redeploy');
+
+  // Ensure we have an action token so the agent runtime can call back into the portal.
+  const portalToken = await getOrCreateAgentActionTokenPlain({
+    agentRow: agent,
+    userId,
+    label: tag
+  });
+
+  const userTransfer = await getUserAiTransferDestination(userId);
+  const operatorNumber = normalizeAiTransferDestination(agent.transfer_to_number) || normalizeAiTransferDestination(userTransfer);
+
+  // Derive the public base URL from the request when available (for background audio URLs).
+  const publicBaseUrl = req ? getPublicBaseUrlFromReq(req) : (process.env.PUBLIC_BASE_URL || process.env.PORTAL_BASE_URL || '');
+  const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
+    userId,
+    agentId,
+    fallbackUrl: agent.background_audio_url,
+    publicBaseUrl
+  });
+
+  const secrets = buildPipecatSecrets({
+    greeting: agent.greeting,
+    prompt: agent.prompt,
+    cartesiaVoiceId: agent.cartesia_voice_id,
+    portalAgentActionToken: portalToken,
+    operatorNumber,
+    backgroundAudioUrl: bgUrlResolved,
+    backgroundAudioGain: agent.background_audio_gain
+  });
+
+  // Ensure the secret set exists/updated
+  await pipecatUpsertSecretSet(secretSetName, secrets, region);
+
+  // Force a restart by deleting + recreating the Pipecat agent service.
+  await pipecatDeleteAgent(agentName);
+  await pipecatCreateAgent({ agentName, secretSetName, regionOverride: region });
+
+  if (DEBUG) console.log('[ai.agents.redeploy.helper] completed', { agentId, userId, tag });
+
+  return { success: true };
+}
+
 function buildPipecatSecrets({ greeting, prompt, cartesiaVoiceId, portalBaseUrl, portalAgentActionToken, operatorNumber, backgroundAudioUrl, backgroundAudioGain }) {
   const deepgram = process.env.DEEPGRAM_API_KEY || '';
   const cartesia = process.env.CARTESIA_API_KEY || '';
@@ -13238,7 +13384,7 @@ app.get('/api/public/ai/agents/:id/background-audio.wav', async (req, res) => {
   }
 });
 
-// Redeploy agent (force restart by deleting + recreating the Pipecat agent with the same name + secrets)
+// Redeploy agent for the current user (force restart by deleting + recreating the Pipecat agent)
 app.post('/api/me/ai/agents/:id/redeploy', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
@@ -13250,47 +13396,8 @@ app.post('/api/me/ai/agents/:id/redeploy', requireAuth, async (req, res) => {
     const agent = rows && rows[0];
     if (!agent) return res.status(404).json({ success: false, message: 'Agent not found' });
 
-    const agentName = String(agent.pipecat_agent_name || '').trim();
-    const secretSetName = String(agent.pipecat_secret_set || '').trim();
-    const region = String(agent.pipecat_region || PIPECAT_REGION || 'us-west');
-
-    if (!agentName || !secretSetName) {
-      return res.status(500).json({ success: false, message: 'Agent not configured' });
-    }
-
     try {
-      const portalToken = await getOrCreateAgentActionTokenPlain({
-        agentRow: agent,
-        userId,
-        label: 'ai.agents.redeploy'
-      });
-
-      const userTransfer = await getUserAiTransferDestination(userId);
-      const operatorNumber = normalizeAiTransferDestination(agent.transfer_to_number) || normalizeAiTransferDestination(userTransfer);
-      const publicBaseUrl = getPublicBaseUrlFromReq(req);
-      const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
-        userId,
-        agentId,
-        fallbackUrl: agent.background_audio_url,
-        publicBaseUrl
-      });
-
-      const secrets = buildPipecatSecrets({
-        greeting: agent.greeting,
-        prompt: agent.prompt,
-        cartesiaVoiceId: agent.cartesia_voice_id,
-        portalAgentActionToken: portalToken,
-        operatorNumber,
-        backgroundAudioUrl: bgUrlResolved,
-        backgroundAudioGain: agent.background_audio_gain
-      });
-
-      // Ensure the secret set exists/updated
-      await pipecatUpsertSecretSet(secretSetName, secrets, region);
-
-      // Force a restart by deleting + recreating the Pipecat agent service.
-      await pipecatDeleteAgent(agentName);
-      await pipecatCreateAgent({ agentName, secretSetName, regionOverride: region });
+      await redeployPipecatAgentForRow({ agentRow: agent, req, label: 'ai.agents.redeploy' });
     } catch (provErr) {
       const msg = provErr?.message || 'Failed to redeploy agent in Pipecat';
       return res.status(502).json({ success: false, message: msg, error: provErr?.data });

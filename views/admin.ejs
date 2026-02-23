@@ -238,6 +238,47 @@
     /* Empty state */
     .empty-state{text-align:center;padding:30px;color:var(--muted2)}
 
+    /* Toast notifications */
+    .admin-toast{
+      position:fixed;
+      right:16px;
+      bottom:16px;
+      z-index:200;
+      min-width:220px;
+      max-width:360px;
+      padding:10px 14px;
+      border-radius:10px;
+      font-size:13px;
+      background:#ecfdf5;
+      border:1px solid rgba(16,185,129,.4);
+      color:#065f46;
+      box-shadow:var(--shadow-sm);
+      opacity:0;
+      pointer-events:none;
+      transform:translateY(8px);
+      transition:opacity .15s ease, transform .15s ease;
+    }
+    .admin-toast--visible{
+      opacity:1;
+      transform:translateY(0);
+      pointer-events:auto;
+    }
+    .admin-toast--success{
+      background:#ecfdf5;
+      border-color:rgba(16,185,129,.4);
+      color:#065f46;
+    }
+    .admin-toast--error{
+      background:rgba(239,68,68,.10);
+      border-color:rgba(239,68,68,.45);
+      color:#991b1b;
+    }
+    .admin-toast--info{
+      background:#eff6ff;
+      border-color:rgba(59,130,246,.4);
+      color:#1d4ed8;
+    }
+
     /* Mobile header/navigation */
     .mobile-nav{
       display:none;
@@ -327,6 +368,7 @@
           <input type="search" id="userSearch" placeholder="Search users..." style="min-width:200px">
           <button onclick="searchUsers()">Search</button>
           <button onclick="loadUsers(0)">Refresh</button>
+          <button class="btn--danger" onclick="redeployAllAgents()">Redeploy all users' AI agents</button>
         </div>
         <div id="userTableContainer">
           <div class="loading"><div class="spinner"></div>Loading users...</div>
@@ -367,6 +409,8 @@
     </main>
   </div>
 </div>
+
+<div id="adminToast" class="admin-toast"></div>
 
 <!-- User Detail Modal -->
 <div class="modal-overlay" id="userModal">
@@ -669,6 +713,7 @@ function renderUserTable() {
           <td>${created}</td>
           <td>
             <button class="btn--sm" onclick="viewUser(${u.id})">View</button>
+            <button class="btn--sm" onclick="redeployUserAgents(${u.id})">Redeploy AI</button>
             ${u.suspended 
               ? `<button class="btn--sm btn--success" onclick="unsuspendUser(${u.id})">Unsuspend</button>`
               : `<button class="btn--sm btn--danger" onclick="suspendUser(${u.id})">Suspend</button>`}
@@ -770,6 +815,34 @@ function closeUserModal() {
   document.getElementById('userModal').classList.remove('active');
 }
 
+// Redeploy all AI agents for a specific user
+async function redeployUserAgents(id) {
+  if (!confirm('Redeploy all AI agents for this user? This will restart their agents and may interrupt active calls.')) return;
+  try {
+    var res = await fetch('/api/admin/users/' + id + '/redeploy-ai-agents', { method: 'POST' });
+    var data = await res.json().catch(function() { return null; });
+    if (!res.ok || !data) throw new Error('Request failed');
+    var msg = data.message || ('Redeploy completed for user ' + id + '.');
+    showAdminToast(msg, 'success');
+  } catch (e) {
+    showAdminToast('Error: ' + e.message, 'error');
+  }
+}
+
+// Redeploy all AI agents for all users
+async function redeployAllAgents() {
+  if (!confirm('Redeploy ALL AI agents for ALL users? This will restart every agent service and may interrupt active calls.')) return;
+  try {
+    var res = await fetch('/api/admin/ai/agents/redeploy-all', { method: 'POST' });
+    var data = await res.json().catch(function() { return null; });
+    if (!res.ok || !data) throw new Error('Request failed');
+    var msg = data.message || 'Redeploy completed across all users.';
+    showAdminToast(msg, 'success');
+  } catch (e) {
+    showAdminToast('Error: ' + e.message, 'error');
+  }
+}
+
 // Suspend user
 async function suspendUser(id) {
   if (!confirm('Are you sure you want to suspend this user?')) return;
@@ -777,10 +850,10 @@ async function suspendUser(id) {
     var res = await fetch('/api/admin/users/' + id + '/suspend', { method: 'POST' });
     var data = await res.json();
     if (!data.success) throw new Error(data.message);
-    alert('User suspended');
+    showAdminToast('User suspended', 'success');
     loadUsers(userPagination.page);
   } catch (e) {
-    alert('Error: ' + e.message);
+    showAdminToast('Error: ' + e.message, 'error');
   }
 }
 
@@ -790,10 +863,10 @@ async function unsuspendUser(id) {
     var res = await fetch('/api/admin/users/' + id + '/unsuspend', { method: 'POST' });
     var data = await res.json();
     if (!data.success) throw new Error(data.message);
-    alert('User unsuspended');
+    showAdminToast('User unsuspended', 'success');
     loadUsers(userPagination.page);
   } catch (e) {
-    alert('Error: ' + e.message);
+    showAdminToast('Error: ' + e.message, 'error');
   }
 }
 
@@ -804,11 +877,11 @@ async function toggleAdmin(id) {
     var res = await fetch('/api/admin/users/' + id + '/toggle-admin', { method: 'POST' });
     var data = await res.json();
     if (!data.success) throw new Error(data.message);
-    alert(data.message);
+    showAdminToast(data.message || 'Admin status updated', 'success');
     loadUsers(userPagination.page);
     closeUserModal();
   } catch (e) {
-    alert('Error: ' + e.message);
+    showAdminToast('Error: ' + e.message, 'error');
   }
 }
 
@@ -829,7 +902,7 @@ async function submitBalanceAdjustment() {
   var description = document.getElementById('balanceDescription').value.trim() || 'Admin adjustment';
   
   if (!Number.isFinite(amount) || amount === 0) {
-    alert('Please enter a valid non-zero amount');
+    showAdminToast('Please enter a valid non-zero amount', 'error');
     return;
   }
   
@@ -841,11 +914,11 @@ async function submitBalanceAdjustment() {
     });
     var data = await res.json();
     if (!data.success) throw new Error(data.message);
-    alert(data.message);
+    showAdminToast(data.message || 'Balance adjusted', 'success');
     closeBalanceModal();
     viewUser(selectedUserId);
   } catch (e) {
-    alert('Error: ' + e.message);
+    showAdminToast('Error: ' + e.message, 'error');
   }
 }
 
@@ -895,7 +968,22 @@ function renderIntegrations(integrations) {
 
 function escapeHtml(str) {
   if (!str) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');
+}
+
+var adminToastTimer = null;
+function showAdminToast(message, type) {
+  var el = document.getElementById('adminToast');
+  if (!el) return;
+  var t = type || 'info';
+  el.textContent = String(message || '');
+  el.className = 'admin-toast admin-toast--' + t + ' admin-toast--visible';
+  if (adminToastTimer) {
+    clearTimeout(adminToastTimer);
+  }
+  adminToastTimer = setTimeout(function() {
+    el.className = 'admin-toast';
+  }, 4000);
 }
 
 // Initialize on page load
