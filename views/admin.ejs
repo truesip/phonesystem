@@ -782,6 +782,64 @@ async function viewUser(id) {
       </div>
       
       <div class="detail-section">
+        <h4>AI Numbers</h4>
+        ${data.aiNumbers.length ? (() => {
+          const agentMap = {};
+          for (const a of data.agents || []) { agentMap[a.id] = a; }
+          const rows = data.aiNumbers.map(n => {
+            const agent = n.agent_id ? agentMap[n.agent_id] : null;
+            const agentName = agent ? escapeHtml(agent.display_name) : (n.agent_id ? ('#' + n.agent_id) : '-');
+            const created = n.created_at ? new Date(n.created_at).toLocaleString() : '';
+            const assigned = !!n.agent_id;
+            const enabled = !!n.dialin_config_id;
+            const cancelPending = !!n.cancel_pending;
+            let statusParts = [];
+            statusParts.push(assigned ? 'Assigned' : 'Unassigned');
+            statusParts.push(enabled ? 'Enabled' : 'Disabled');
+            if (cancelPending) statusParts.push('Cancel pending');
+            const status = statusParts.join(' · ');
+            return `
+              <tr>
+                <td><input type="checkbox" class="admin-ai-number-checkbox" value="${n.id}"></td>
+                <td>${escapeHtml(n.phone_number)}</td>
+                <td>${agentName}</td>
+                <td>${status}</td>
+                <td>${created}</td>
+              </tr>
+            `;
+          }).join('');
+          return `
+            <div style="margin-bottom:8px; font-size:12px; color:var(--muted)">Select one or more numbers to enable/disable or delete. Buying a new AI number will attach it to this user.</div>
+            <table style="font-size:12px">
+              <thead>
+                <tr>
+                  <th style="width:28px;"><input type="checkbox" id="adminAiNumbersSelectAll" onclick="toggleAdminAiNumbersSelectAll(this)"></th>
+                  <th>Number</th>
+                  <th>Agent</th>
+                  <th>Status</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows}
+              </tbody>
+            </table>
+            <div class="modal-actions" style="justify-content:space-between;margin-top:8px">
+              <div style="display:flex;gap:6px;align-items:center;font-size:12px;">
+                <input type="text" id="adminBuyAiNumberInput" placeholder="Specific number (optional)" style="max-width:200px">
+                <button class="btn--primary btn--sm" onclick="adminBuyAiNumberForUser(${u.id})">Buy AI Number</button>
+              </div>
+              <div style="display:flex;gap:6px">
+                <button class="btn--sm" onclick="adminEnableSelectedAiNumbers(${u.id})">Enable selected</button>
+                <button class="btn--sm" onclick="adminDisableSelectedAiNumbers(${u.id})">Disable selected</button>
+                <button class="btn--sm btn--danger" onclick="adminDeleteSelectedAiNumbers(${u.id})">Delete selected</button>
+              </div>
+            </div>
+          `;
+        })() : '<div class="empty-state">No AI numbers for this user. Use \'Buy AI Number\' to purchase one on their behalf.</div>'}
+      </div>
+      
+      <div class="detail-section">
         <h4>Recent Billing (Last 20)</h4>
         ${data.recentBilling.length ? `
           <table style="font-size:12px">
@@ -813,6 +871,89 @@ async function viewUser(id) {
 
 function closeUserModal() {
   document.getElementById('userModal').classList.remove('active');
+}
+
+function getSelectedAdminAiNumberIds() {
+  var boxes = document.querySelectorAll('#userModalContent input.admin-ai-number-checkbox');
+  var ids = [];
+  boxes.forEach(function(b){ if (b.checked && b.value) ids.push(b.value); });
+  return ids;
+}
+
+function toggleAdminAiNumbersSelectAll(master) {
+  var boxes = document.querySelectorAll('#userModalContent input.admin-ai-number-checkbox');
+  boxes.forEach(function(b){ b.checked = !!master.checked; });
+}
+
+async function adminBuyAiNumberForUser(userId) {
+  var input = document.getElementById('adminBuyAiNumberInput');
+  var number = input ? input.value.trim() : '';
+  try {
+    var res = await fetch('/api/admin/users/' + userId + '/ai/numbers/buy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(number ? { number: number } : {})
+    });
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message);
+    showAdminToast('AI number purchased for user ' + userId + '.', 'success');
+    input && (input.value = '');
+    viewUser(userId);
+  } catch (e) {
+    showAdminToast('Error buying AI number: ' + e.message, 'error');
+  }
+}
+
+async function adminEnableSelectedAiNumbers(userId) {
+  var ids = getSelectedAdminAiNumberIds();
+  if (!ids.length) {
+    showAdminToast('Select at least one AI number to enable.', 'error');
+    return;
+  }
+  try {
+    for (const id of ids) {
+      await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id) + '/enable', { method: 'POST' });
+    }
+    showAdminToast('Enable requested for ' + ids.length + ' AI number(s).', 'success');
+    viewUser(userId);
+  } catch (e) {
+    showAdminToast('Error enabling AI numbers: ' + e.message, 'error');
+  }
+}
+
+async function adminDisableSelectedAiNumbers(userId) {
+  var ids = getSelectedAdminAiNumberIds();
+  if (!ids.length) {
+    showAdminToast('Select at least one AI number to disable.', 'error');
+    return;
+  }
+  try {
+    for (const id of ids) {
+      await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id) + '/disable', { method: 'POST' });
+    }
+    showAdminToast('Disable requested for ' + ids.length + ' AI number(s).', 'success');
+    viewUser(userId);
+  } catch (e) {
+    showAdminToast('Error disabling AI numbers: ' + e.message, 'error');
+  }
+}
+
+async function adminDeleteSelectedAiNumbers(userId) {
+  var ids = getSelectedAdminAiNumberIds();
+  if (!ids.length) {
+    showAdminToast('Select at least one AI number to delete.', 'error');
+    return;
+  }
+  if (!confirm('Delete ' + ids.length + ' AI number(s)? This will release the numbers and cannot be undone.')) return;
+  try {
+    for (const id of ids) {
+      await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id), { method: 'DELETE' });
+    }
+    showAdminToast('Delete requested for ' + ids.length + ' AI number(s).', 'success');
+    viewUser(userId);
+  } catch (e) {
+    showAdminToast('Error deleting AI numbers: ' + e.message, 'error');
+  }
 }
 
 // Redeploy all AI agents for a specific user

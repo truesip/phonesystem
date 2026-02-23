@@ -4509,7 +4509,7 @@ app.get('/api/admin/users/:id', requireAdmin, async (req, res) => {
       [userId]
     );
     const [aiNumbers] = await pool.execute(
-      `SELECT id, phone_number, agent_id, cancel_pending, created_at FROM ai_numbers WHERE user_id = ?`,
+      `SELECT id, phone_number, agent_id, dialin_config_id, cancel_pending, created_at FROM ai_numbers WHERE user_id = ?`,
       [userId]
     );
     const [agents] = await pool.execute(
@@ -4738,6 +4738,250 @@ app.post('/api/admin/ai/agents/redeploy-all', requireAdmin, async (req, res) => 
   } catch (e) {
     console.error('[admin.redeploy-ai-agents.all] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to redeploy AI agents across all users' });
+  }
+});
+
+// Admin API: Buy an AI number on behalf of a user
+app.post('/api/admin/users/:id/ai/numbers/buy', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.params.id;
+
+    const [[cnt]] = await pool.execute('SELECT COUNT(*) AS total FROM ai_numbers WHERE user_id = ?', [userId]);
+    const total = Number(cnt?.total || 0);
+    if (total >= AI_MAX_NUMBERS) {
+      return res.status(400).json({ success: false, message: `User can have up to ${AI_MAX_NUMBERS} AI phone numbers.` });
+    }
+
+    // Balance must be positive to buy/assign AI phone numbers (same as user flow).
+    const buyBalance = await getUserBalance(userId);
+    if (buyBalance != null && buyBalance <= 0) {
+      return res.status(402).json({
+        success: false,
+        message: `Insufficient balance. Current balance is $${buyBalance.toFixed(2)}. Please add funds and try again.`
+      });
+    }
+
+    const localFee = parseFloat(process.env.AI_DID_LOCAL_MONTHLY_FEE || process.env.DID_LOCAL_MONTHLY_MARKUP || '0') || 0;
+    const tollfreeFee = parseFloat(process.env.AI_DID_TOLLFREE_MONTHLY_FEE || process.env.DID_TOLLFREE_MONTHLY_MARKUP || '0') || 0;
+    const requiredMonthly = Math.max(localFee, tollfreeFee, 0);
+    if (requiredMonthly > 0) {
+      try {
+        const currentCredit = await getUserBalance(userId);
+        if (DEBUG) console.log('[admin.ai.number.buy] Balance check:', { userId, currentCredit, requiredMonthly });
+        if (currentCredit != null && currentCredit < requiredMonthly) {
+          return res.status(400).json({
+            success: false,
+            message: `Insufficient balance. This AI number costs at least $${requiredMonthly.toFixed(2)} per month and the current balance is $${Number(currentCredit).toFixed(2)}. Add funds and try again.`
+          });
+        }
+      } catch (balanceErr) {
+        if (DEBUG) console.error('[admin.ai.number.buy] Failed to check balance:', balanceErr.message || balanceErr);
+        return res.status(500).json({ success: false, message: 'Failed to verify account balance. Please try again.' });
+      }
+    }
+
+    const requestedNumber = String((req.body && (req.body.number || req.body.phone_number || req.body.phoneNumber)) || '').trim();
+    if (requestedNumber && requestedNumber.length > 64) {
+      return res.status(400).json({ success: false, message: 'number is too long' });
+    }
+
+    const { dailyNumberId, phoneNumber } = requestedNumber
+      ? await dailyBuySpecificPhoneNumber(requestedNumber)
+      : await dailyBuyAnyAvailableNumber();
+
+    const [ins] = await pool.execute(
+      'INSERT INTO ai_numbers (user_id, daily_number_id, phone_number) VALUES (?,?,?)',
+      [userId, dailyNumberId, phoneNumber]
+    );
+
+    try {
+      if (requiredMonthly > 0) {
+        const [nrows] = await pool.execute(
+          'SELECT id, phone_number, created_at FROM ai_numbers WHERE id = ? AND user_id = ? LIMIT 1',
+          [ins.insertId, userId]
+        );
+        const numRow = nrows && nrows[0];
+        if (numRow) {
+          await chargeAiNumberMonthlyFee({
+            userId,
+            aiNumberId: numRow.id,
+            phoneNumber: numRow.phone_number,
+            monthlyAmount: requiredMonthly,
+            isTollfree: detectTollfreeUsCaByNpa(numRow.phone_number),
+            billedTo: numRow.created_at
+          });
+        }
+      }
+    } catch (billErr) {
+      if (DEBUG) console.warn('[admin.ai.number.buy] Initial monthly fee billing failed (will retry via scheduler):', billErr.message || billErr);
+    }
+
+    return res.json({ success: true, data: { id: ins.insertId, daily_number_id: dailyNumberId, phone_number: phoneNumber } });
+  } catch (e) {
+    if (DEBUG) console.error('[admin.ai.number.buy] error:', e.data || e.message || e);
+    return res.status(500).json({ success: false, message: e.message || 'Failed to buy AI number' });
+  }
+});
+
+// Admin API: Disable an AI number (remove dial-in config but keep ownership)
+app.post('/api/admin/ai/numbers/:id/disable', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const numberId = req.params.id;
+    const [rows] = await pool.execute('SELECT id, user_id, phone_number, agent_id, dialin_config_id FROM ai_numbers WHERE id = ? LIMIT 1', [numberId]);
+    const num = rows && rows[0];
+    if (!num) return res.status(404).json({ success: false, message: 'AI number not found' });
+
+    if (num.dialin_config_id) {
+      try {
+        await dailyDeleteDialinConfig(num.dialin_config_id);
+      } catch (e) {
+        if (DEBUG) console.warn('[admin.ai.numbers.disable] dialin delete failed', e.message || e);
+      }
+    }
+
+    await pool.execute('UPDATE ai_numbers SET dialin_config_id = NULL WHERE id = ?', [numberId]);
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error('[admin.ai.numbers.disable] error:', e.data || e.message || e);
+    return res.status(500).json({ success: false, message: e.message || 'Failed to disable AI number' });
+  }
+});
+
+// Admin API: Enable an AI number (recreate dial-in config to its assigned agent)
+app.post('/api/admin/ai/numbers/:id/enable', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const numberId = req.params.id;
+    const [rows] = await pool.execute('SELECT * FROM ai_numbers WHERE id = ? LIMIT 1', [numberId]);
+    const num = rows && rows[0];
+    if (!num) return res.status(404).json({ success: false, message: 'AI number not found' });
+
+    const userId = num.user_id;
+    if (!num.agent_id) {
+      return res.status(400).json({ success: false, message: 'Cannot enable AI number without an assigned agent' });
+    }
+    if (num.cancel_pending) {
+      return res.status(409).json({ success: false, message: 'This AI number is being cancelled and cannot be enabled.' });
+    }
+
+    // Balance must be positive to route calls (same as user assign flow).
+    const currentBalance = await getUserBalance(userId);
+    if (currentBalance != null && currentBalance <= 0) {
+      return res.status(402).json({
+        success: false,
+        message: `Insufficient balance. Current balance is $${currentBalance.toFixed(2)}. Add funds and try again.`
+      });
+    }
+
+    const [arows] = await pool.execute('SELECT * FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1', [num.agent_id, userId]);
+    const agent = arows && arows[0];
+    if (!agent) return res.status(404).json({ success: false, message: 'Assigned agent not found' });
+
+    try {
+      const portalToken = await getOrCreateAgentActionTokenPlain({
+        agentRow: agent,
+        userId,
+        label: 'admin.ai.numbers.enable'
+      });
+
+      const userTransfer = await getUserAiTransferDestination(userId);
+      const operatorNumber = normalizeAiTransferDestination(agent.transfer_to_number) || normalizeAiTransferDestination(userTransfer);
+      const publicBaseUrl = getPublicBaseUrlFromReq(req);
+      const bgUrlResolved = await resolveAgentBackgroundAudioUrl({
+        userId,
+        agentId: agent.id,
+        fallbackUrl: agent.background_audio_url,
+        publicBaseUrl
+      });
+
+      const secrets = buildPipecatSecrets({
+        greeting: agent.greeting,
+        prompt: agent.prompt,
+        cartesiaVoiceId: agent.cartesia_voice_id,
+        portalAgentActionToken: portalToken,
+        operatorNumber,
+        backgroundAudioUrl: bgUrlResolved,
+        backgroundAudioGain: agent.background_audio_gain
+      });
+      await pipecatUpsertSecretSet(agent.pipecat_secret_set, secrets, agent.pipecat_region || PIPECAT_REGION);
+      await pipecatUpdateAgent({
+        agentName: agent.pipecat_agent_name,
+        secretSetName: agent.pipecat_secret_set,
+        regionOverride: agent.pipecat_region || PIPECAT_REGION
+      });
+    } catch (provErr) {
+      const msg = provErr?.message || 'Failed to update agent in Pipecat';
+      return res.status(502).json({ success: false, message: msg, error: provErr?.data });
+    }
+
+    const roomCreationApi = buildDailyRoomCreationApiUrl({ agentName: agent.pipecat_agent_name });
+    const { dialinConfigId } = await dailyUpsertDialinConfig({ phoneNumber: num.phone_number, roomCreationApi });
+
+    await pool.execute(
+      'UPDATE ai_numbers SET dialin_config_id = ? WHERE id = ?',
+      [dialinConfigId, numberId]
+    );
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error('[admin.ai.numbers.enable] error:', e.data || e.message || e);
+    return res.status(500).json({ success: false, message: e.message || 'Failed to enable AI number' });
+  }
+});
+
+// Admin API: Delete AI number (release from Daily)
+app.delete('/api/admin/ai/numbers/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const numberId = req.params.id;
+
+    const [rows] = await pool.execute(
+      'SELECT * FROM ai_numbers WHERE id = ? LIMIT 1',
+      [numberId]
+    );
+    const num = rows && rows[0];
+    if (!num) return res.status(404).json({ success: false, message: 'AI number not found' });
+
+    const createdAt = num.created_at ? new Date(num.created_at) : null;
+    const now = new Date();
+    const ageInDays = createdAt ? Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)) : 0;
+    const MIN_AGE_DAYS = 28;
+
+    if (ageInDays < MIN_AGE_DAYS) {
+      const daysRemaining = MIN_AGE_DAYS - ageInDays;
+      return res.status(400).json({
+        success: false,
+        message: `This number cannot be deleted yet. Daily phone numbers can only be released after ${MIN_AGE_DAYS} days. Please wait ${daysRemaining} more day${daysRemaining === 1 ? '' : 's'}.`
+      });
+    }
+
+    if (num.dialin_config_id) {
+      try {
+        await dailyDeleteDialinConfig(num.dialin_config_id);
+      } catch (e) {
+        if (DEBUG) console.warn('[admin.ai.numbers.delete] dialin delete failed', e.message || e);
+      }
+    }
+
+    try {
+      await dailyReleasePhoneNumber(num.daily_number_id);
+    } catch (e) {
+      const msg = e?.message || 'Failed to release phone number from Daily';
+      if (DEBUG) console.error('[admin.ai.numbers.delete] Daily release failed:', e?.data || msg);
+      return res.status(502).json({ success: false, message: msg });
+    }
+
+    await pool.execute('DELETE FROM ai_numbers WHERE id = ?', [numberId]);
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error('[admin.ai.numbers.delete] error:', e.data || e.message || e);
+    return res.status(500).json({ success: false, message: e.message || 'Failed to delete AI number' });
   }
 });
 
