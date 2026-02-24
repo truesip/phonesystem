@@ -546,6 +546,11 @@ async function loadStats() {
           <div class="kpi-label">Crypto Payments</div>
           <div class="kpi-sub">${fmt(f.revenueByMethod.crypto.total)}</div>
         </div>
+        <div class="kpi-card">
+          <div class="kpi-value">${num(f.revenueByMethod.nyvapay.count)}</div>
+          <div class="kpi-label">NyvaPay Payments</div>
+          <div class="kpi-sub">${fmt(f.revenueByMethod.nyvapay.total)}</div>
+        </div>
         <div class="kpi-card warning">
           <div class="kpi-value">${num(f.pendingPayments)}</div>
           <div class="kpi-label">Pending Payments</div>
@@ -557,6 +562,7 @@ async function loadStats() {
           <div class="stat-row"><span class="stat-label">Stripe</span><span class="stat-value">${fmt(f.revenueByMethod.stripe.total)} (${num(f.revenueByMethod.stripe.count)})</span></div>
           <div class="stat-row"><span class="stat-label">Crypto</span><span class="stat-value">${fmt(f.revenueByMethod.crypto.total)} (${num(f.revenueByMethod.crypto.count)})</span></div>
           <div class="stat-row"><span class="stat-label">Square</span><span class="stat-value">${fmt(f.revenueByMethod.square.total)} (${num(f.revenueByMethod.square.count)})</span></div>
+          <div class="stat-row"><span class="stat-label">NyvaPay</span><span class="stat-value">${fmt(f.revenueByMethod.nyvapay.total)} (${num(f.revenueByMethod.nyvapay.count)})</span></div>
           <div class="stat-row"><span class="stat-label">Bill.com</span><span class="stat-value">${num(f.revenueByMethod.billcom.count)} payments</span></div>
         </div>
         <div class="stats-box">

@@ -4209,6 +4209,12 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     `, [], { total: 0, count: 0 });
     const squareStats = squareStatsRows || { total: 0, count: 0 };
 
+    const [nyvaStatsRows] = await safeQuery(`
+      SELECT COALESCE(SUM(amount), 0) as total, COUNT(*) as count 
+      FROM nyvapay_payments WHERE status='COMPLETED' AND credited=1
+    `, [], { total: 0, count: 0 });
+    const nyvapayStats = nyvaStatsRows || { total: 0, count: 0 };
+
     const [billcomStatsRows] = await safeQuery(`
       SELECT COUNT(*) as count FROM billcom_payments WHERE status='paid' AND credited=1
     `, [], { count: 0 });
@@ -4218,7 +4224,14 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     const [pendingStripe] = await safeQuery(`SELECT COUNT(*) as c FROM stripe_payments WHERE status='pending'`, [], { c: 0 });
     const [pendingCrypto] = await safeQuery(`SELECT COUNT(*) as c FROM nowpayments_payments WHERE payment_status='waiting'`, [], { c: 0 });
     const [pendingSquare] = await safeQuery(`SELECT COUNT(*) as c FROM square_payments WHERE status='pending'`, [], { c: 0 });
-    const pendingPayments = { count: (Number(pendingStripe?.c) || 0) + (Number(pendingCrypto?.c) || 0) + (Number(pendingSquare?.c) || 0) };
+    const [pendingNyva] = await safeQuery(`SELECT COUNT(*) as c FROM nyvapay_payments WHERE status='pending'`, [], { c: 0 });
+    const pendingPayments = {
+      count:
+        (Number(pendingStripe?.c) || 0) +
+        (Number(pendingCrypto?.c) || 0) +
+        (Number(pendingSquare?.c) || 0) +
+        (Number(pendingNyva?.c) || 0)
+    };
 
     // Telephony stats
     const [didStatsRows] = await safeQuery(`
@@ -4342,7 +4355,11 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
       ORDER BY date ASC
     `, [], null) || [];
 
-    const totalRevenue = Number(stripeStats.total) + Number(cryptoStats.total) + Number(squareStats.total);
+    const totalRevenue =
+      Number(stripeStats.total) +
+      Number(cryptoStats.total) +
+      Number(squareStats.total) +
+      Number(nyvapayStats.total);
 
     return res.json({
       success: true,
@@ -4353,12 +4370,13 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
           newThisMonth: Number(userStats.newThisMonth) || 0,
           suspended: Number(userStats.suspended) || 0
         },
-        financial: {
+          financial: {
           totalRevenue,
           revenueByMethod: {
-            stripe: { total: Number(stripeStats.total) || 0, count: Number(stripeStats.count) || 0 },
-            crypto: { total: Number(cryptoStats.total) || 0, count: Number(cryptoStats.count) || 0 },
-            square: { total: Number(squareStats.total) || 0, count: Number(squareStats.count) || 0 },
+            stripe:  { total: Number(stripeStats.total)   || 0, count: Number(stripeStats.count)   || 0 },
+            crypto:  { total: Number(cryptoStats.total)   || 0, count: Number(cryptoStats.count)   || 0 },
+            square:  { total: Number(squareStats.total)   || 0, count: Number(squareStats.count)   || 0 },
+            nyvapay: { total: Number(nyvapayStats.total)  || 0, count: Number(nyvapayStats.count)  || 0 },
             billcom: { count: Number(billcomStats.count) || 0 }
           },
           pendingPayments: Number(pendingPayments.count) || 0
