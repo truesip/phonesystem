@@ -17070,10 +17070,20 @@ app.post('/webhooks/pipecat/dialin-completed', async (req, res) => {
 
     let logRow = null;
     try {
-      const [rows] = await pool.execute(
-        'SELECT id, user_id, agent_id FROM ai_call_logs WHERE call_id = ? AND (call_domain = ? OR ? = "") ORDER BY id DESC LIMIT 1',
-        [callId, callDomain, callDomain]
-      );
+      let rows;
+      if (callDomain) {
+        // When call_domain is present, match on both call_id and call_domain.
+        [rows] = await pool.execute(
+          'SELECT id, user_id, agent_id FROM ai_call_logs WHERE call_id = ? AND call_domain = ? ORDER BY id DESC LIMIT 1',
+          [callId, callDomain]
+        );
+      } else {
+        // Fallback: match by call_id only.
+        [rows] = await pool.execute(
+          'SELECT id, user_id, agent_id FROM ai_call_logs WHERE call_id = ? ORDER BY id DESC LIMIT 1',
+          [callId]
+        );
+      }
       logRow = rows && rows[0] ? rows[0] : null;
     } catch (e) {
       if (DEBUG) console.warn('[pipecat.dialin-completed] ai_call_logs lookup failed:', e?.message || e);
