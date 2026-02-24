@@ -18824,6 +18824,12 @@ const NOWPAYMENTS_IPN_SECRET = process.env.NOWPAYMENTS_IPN_SECRET || '';
 const NOWPAYMENTS_API_URL = process.env.NOWPAYMENTS_API_URL || 'https://api.nowpayments.io/v1';
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
 
+// NyvaPay configuration (card payment links)
+// NyvaPay uses merchant email + API key headers and a payment-links endpoint.
+const NYVAPAY_API_URL = process.env.NYVAPAY_API_URL || 'https://nyvapay.com/api';
+const NYVAPAY_MERCHANT_EMAIL = process.env.NYVAPAY_MERCHANT_EMAIL || '';
+const NYVAPAY_API_KEY = process.env.NYVAPAY_API_KEY || '';
+
 // Bill.com / BILL configuration (invoice + payment link)
 const BILLCOM_ENVIRONMENT = String(process.env.BILLCOM_ENVIRONMENT || 'sandbox').trim().toLowerCase(); // sandbox | production
 const BILLCOM_API_URL = process.env.BILLCOM_API_URL || (
@@ -18840,6 +18846,7 @@ const BILLCOM_WEBHOOK_SECURITY_KEY = process.env.BILLCOM_WEBHOOK_SECURITY_KEY ||
 // Card payment provider selector
 // - square (default): Square Payment Links
 // - stripe: Stripe hosted Checkout
+// - nyvapay: NyvaPay hosted card payment links
 const CARD_PAYMENT_PROVIDER = String(process.env.CARD_PAYMENT_PROVIDER || 'square').trim().toLowerCase();
 
 // Stripe configuration (hosted Checkout)
@@ -18873,6 +18880,22 @@ function nowpaymentsAxios() {
     timeout: 15000,
     headers: {
       'x-api-key': NOWPAYMENTS_API_KEY,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    }
+  });
+}
+
+function nyvaPayAxios() {
+  if (!NYVAPAY_MERCHANT_EMAIL || !NYVAPAY_API_KEY) {
+    throw new Error('NyvaPay is not configured');
+  }
+  return axios.create({
+    baseURL: NYVAPAY_API_URL,
+    timeout: 15000,
+    headers: {
+      'X-Merchant-Email': NYVAPAY_MERCHANT_EMAIL,
+      'X-API-Key': NYVAPAY_API_KEY,
       'Content-Type': 'application/json',
       'Accept': 'application/json'
     }

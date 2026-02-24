@@ -245,6 +245,10 @@ services:
       - key: CHECKOUT_MAX_AMOUNT
         value: "250"
 
+      # ── NyvaPay (card payments webhook) ──
+      - key: NYVAPAY_WEBHOOK_URL
+        value: https://app.callchimp.site/webhooks/nyvapay
+
       # ── Click2Mail (physical mail) ──
       - key: AI_PHYSICAL_MAIL_ENABLED
         value: "1"
