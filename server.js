@@ -1683,13 +1683,14 @@ async function initDb() {
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
   
-  // Ensure billing_history has all required columns for balance tracking
+  // Ensure billing_history has all required columns for balance tracking and diagnostics
   for (const colDef of [
     { name: 'transaction_type', ddl: "ALTER TABLE billing_history ADD COLUMN transaction_type VARCHAR(32) NULL AFTER description" },
     { name: 'payment_method', ddl: "ALTER TABLE billing_history ADD COLUMN payment_method VARCHAR(64) NULL AFTER transaction_type" },
     { name: 'reference_id', ddl: "ALTER TABLE billing_history ADD COLUMN reference_id VARCHAR(255) NULL AFTER payment_method" },
     { name: 'balance_before', ddl: "ALTER TABLE billing_history ADD COLUMN balance_before DECIMAL(18,8) NULL AFTER reference_id" },
-    { name: 'balance_after', ddl: "ALTER TABLE billing_history ADD COLUMN balance_after DECIMAL(18,8) NULL AFTER balance_before" }
+    { name: 'balance_after', ddl: "ALTER TABLE billing_history ADD COLUMN balance_after DECIMAL(18,8) NULL AFTER balance_before" },
+    { name: 'error', ddl: "ALTER TABLE billing_history ADD COLUMN error TEXT NULL AFTER status" }
   ]) {
     try {
       const [hasCol] = await pool.query(
@@ -15565,8 +15566,9 @@ async function handleNyvaPayCheckout(req, res) {
     const resp = await client.post('/merchant/payment-links', payload);
     const data = resp?.data || {};
 
-    const paymentUrl = data.payment_url || data.url || data.checkout_url || data.link || null;
-    const paymentLinkId = data.id || data.payment_link_id || data.reference || orderId;
+    // NyvaPay returns pay_url + embed snippet for hosted links.
+    const paymentUrl = data.payment_url || data.url || data.checkout_url || data.link || data.pay_url || null;
+    const paymentLinkId = data.id || data.payment_link_id || data.reference || data.payment_request_id || orderId;
 
     if (!paymentUrl) {
       if (DEBUG) console.error('[nyvapay.checkout] Missing payment link URL in response:', data);
