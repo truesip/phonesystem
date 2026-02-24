@@ -1769,6 +1769,26 @@ async function initDb() {
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
+  // NyvaPay payments table - tracks card payments (NyvaPay payment links) and credits
+  await pool.query(`CREATE TABLE IF NOT EXISTS nyvapay_payments (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    payment_link_id VARCHAR(191) NOT NULL,
+    order_id VARCHAR(191) NOT NULL,
+    nyvapay_payment_id VARCHAR(191) NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    currency VARCHAR(16) NOT NULL DEFAULT 'USD',
+    status VARCHAR(64) NOT NULL DEFAULT 'pending',
+    credited TINYINT(1) NOT NULL DEFAULT 0,
+    raw_payload JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_nyvapay_payment_link (payment_link_id),
+    KEY idx_nyvapay_user (user_id),
+    KEY idx_nyvapay_order (order_id),
+    FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
   // Stripe payments table - tracks card payments (Stripe Checkout) and credits
   await pool.query(`CREATE TABLE IF NOT EXISTS stripe_payments (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
