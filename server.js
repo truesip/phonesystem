@@ -4411,6 +4411,57 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   }
 });
 
+// Admin API: List all AI numbers across all users
+app.get('/api/admin/ai/numbers', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const page = Math.max(0, parseInt(req.query.page || '0', 10));
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit || '50', 10)));
+    const offset = page * limit;
+
+    // Total count
+    const [[countRow]] = await pool.execute('SELECT COUNT(*) AS total FROM ai_numbers', []);
+    const total = Number(countRow?.total || 0);
+
+    // Use query() so LIMIT/OFFSET are interpolated as integers
+    const [rows] = await pool.query(
+      `SELECT n.id,
+              n.user_id,
+              u.username,
+              u.email,
+              n.phone_number,
+              n.daily_number_id,
+              n.agent_id,
+              a.display_name AS agent_name,
+              n.dialin_config_id,
+              n.cancel_pending,
+              n.created_at
+       FROM ai_numbers n
+       LEFT JOIN signup_users u ON u.id = n.user_id
+       LEFT JOIN ai_agents a ON a.id = n.agent_id
+       ORDER BY n.created_at DESC, n.id DESC
+       LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        numbers: rows || [],
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: total > 0 ? Math.ceil(total / limit) : 0
+        }
+      }
+    });
+  } catch (e) {
+    console.error('[admin.ai.numbers.list] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to fetch AI numbers' });
+  }
+});
+
 // Admin API: List all users with pagination and search
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
   try {
@@ -14163,13 +14214,106 @@ app.delete('/api/me/ai/numbers/:id', requireAuth, async (req, res) => {
 
     return res.json({ success: true });
   } catch (e) {
-    if (DEBUG) console.error('[ai.numbers.delete] error:', e.data || e.message || e);
+    if (DEBUG) console.error('[admin.ai.numbers.delete] error:', e.data || e.message || e);
     return res.status(500).json({ success: false, message: e.message || 'Failed to delete number' });
   }
 });
 
-// ========== Billing History ==========
-// Get billing history for current user
+// Admin API: Purge ALL AI numbers across all users (dangerous)
+app.post('/api/admin/ai/numbers/purge-all', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const [rows] = await pool.execute(
+      'SELECT id, user_id, phone_number, daily_number_id, dialin_config_id FROM ai_numbers ORDER BY id ASC',
+      []
+    );
+
+    let total = 0;
+    let released = 0;
+    let deleted = 0;
+    let failed = 0;
+
+    for (const r of rows || []) {
+      total += 1;
+      const aiNumberId = r?.id;
+      const userId = r?.user_id;
+      const dailyNumberId = r?.daily_number_id;
+      const dialinConfigId = r?.dialin_config_id;
+
+      if (!aiNumberId) continue;
+
+      try {
+        // Remove Daily dial-in config if present
+        if (dialinConfigId) {
+          try {
+            await dailyDeleteDialinConfig(dialinConfigId);
+          } catch (e) {
+            if (DEBUG) console.warn('[admin.ai.numbers.purge] dialin delete failed', {
+              aiNumberId,
+              userId,
+              dialinConfigId,
+              message: e?.message || e
+            });
+          }
+        }
+
+        // Best-effort: release the phone number from Daily if we have an id
+        if (dailyNumberId) {
+          try {
+            await dailyReleasePhoneNumber(dailyNumberId);
+            released += 1;
+          } catch (e) {
+            if (DEBUG) console.warn('[admin.ai.numbers.purge] dailyReleasePhoneNumber failed', {
+              aiNumberId,
+              userId,
+              dailyNumberId,
+              message: e?.message || e
+            });
+          }
+        }
+
+        // Delete local DB row
+        await pool.execute('DELETE FROM ai_numbers WHERE id = ? LIMIT 1', [aiNumberId]);
+        deleted += 1;
+
+        // Best-effort: clean related markup/markup_cycles rows
+        try {
+          await pool.execute(
+            'DELETE FROM ai_number_markups WHERE user_id = ? AND ai_number_id = ?',
+            [userId, aiNumberId]
+          );
+        } catch {}
+        try {
+          await pool.execute(
+            'DELETE FROM ai_number_markup_cycles WHERE user_id = ? AND ai_number_id = ?',
+            [userId, aiNumberId]
+          );
+        } catch {}
+      } catch (e) {
+        failed += 1;
+        if (DEBUG) console.error('[admin.ai.numbers.purge] failed for row', {
+          aiNumberId,
+          userId,
+          message: e?.message || e
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      total,
+      released,
+      deleted,
+      failed,
+      message: `Purged ${deleted}/${total} AI numbers (Daily released: ${released}, failed: ${failed}).`
+    });
+  } catch (e) {
+    console.error('[admin.ai.numbers.purge] error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to purge AI numbers' });
+  }
+});
+
 // NOTE: We intentionally hide raw DID purchase rows ("DID Purchase (Order: ...)")
 // from the customer-facing history so users only see Phone.System-level charges
 // such as refills and DID markup fees

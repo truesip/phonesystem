@@ -373,6 +373,15 @@
         <div id="userTableContainer">
           <div class="loading"><div class="spinner"></div>Loading users...</div>
         </div>
+
+        <h3 style="margin-top:24px;">📞 AI Numbers (All Users)</h3>
+        <div class="toolbar">
+          <button class="btn--danger" onclick="purgeAllAiNumbers()">Remove all AI numbers</button>
+          <button onclick="loadAllAiNumbers(0)">Refresh AI numbers</button>
+        </div>
+        <div id="aiNumbersTableContainer">
+          <div class="loading"><div class="spinner"></div>Loading AI numbers...</div>
+        </div>
       </section>
 
       <!-- Financial Section -->
@@ -449,6 +458,8 @@ var stats = null;
 var users = [];
 var userPagination = { page: 0, limit: 25, total: 0, totalPages: 0 };
 var selectedUserId = null;
+var aiNumbersGlobal = [];
+var aiNumbersPagination = { page: 0, limit: 50, total: 0, totalPages: 0 };
 
 // Section navigation
 function showSection(id) {
@@ -461,6 +472,10 @@ function showSection(id) {
   // Keep mobile section selector in sync
   var sel = document.getElementById('mobileSectionSelect');
   if (sel) sel.value = id;
+  // Lazy-load global AI numbers when opening Users section
+  if (id === 'users') {
+    loadAllAiNumbers(0);
+  }
 }
 
 // Format currency
@@ -472,6 +487,13 @@ function fmt(n, decimals) {
 // Format number
 function num(n) {
   return Number(n || 0).toLocaleString('en-US');
+}
+
+function getSelectedGlobalAiNumberIds() {
+  var boxes = document.querySelectorAll('#aiNumbersTableContainer input.admin-global-ai-number-checkbox');
+  var ids = [];
+  boxes.forEach(function(b){ if (b.checked && b.value) ids.push(b.value); });
+  return ids;
 }
 
 // Load platform stats
@@ -656,6 +678,128 @@ function renderAi() {
     </div>
   `;
   document.getElementById('aiStats').innerHTML = html;
+}
+
+// Load all AI numbers across users
+async function loadAllAiNumbers(page) {
+  if (page === undefined) page = 0;
+  try {
+    var res = await fetch('/api/admin/ai/numbers?page=' + page + '&limit=' + aiNumbersPagination.limit);
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Failed to load AI numbers');
+    aiNumbersGlobal = data.data.numbers || [];
+    aiNumbersPagination = data.data.pagination || { page: 0, limit: 50, total: 0, totalPages: 0 };
+    renderAllAiNumbers();
+  } catch (e) {
+    document.getElementById('aiNumbersTableContainer').innerHTML = '<div class="empty-state">Failed to load AI numbers: ' + (e.message || e) + '</div>';
+  }
+}
+
+function renderAllAiNumbers() {
+  if (!aiNumbersGlobal || !aiNumbersGlobal.length) {
+    document.getElementById('aiNumbersTableContainer').innerHTML = '<div class="empty-state">No AI numbers found</div>';
+    return;
+  }
+
+  var html = `
+    <table>
+      <thead>
+        <tr>
+          <th style="width:32px;"><input type="checkbox" id="aiNumbersSelectAll" onclick="toggleGlobalAiNumbersSelectAll(this)"></th>
+          <th>ID</th>
+          <th>Number</th>
+          <th>User</th>
+          <th>Agent</th>
+          <th>Status</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  aiNumbersGlobal.forEach(function(n) {
+    var userLabel = (n.username || '') + (n.email ? ' (' + n.email + ')' : '');
+    if (!userLabel.trim()) userLabel = 'User #' + n.user_id;
+    var agentLabel = n.agent_name || (n.agent_id ? ('Agent #' + n.agent_id) : '-');
+    var statusParts = [];
+    statusParts.push(n.agent_id ? 'Assigned' : 'Unassigned');
+    statusParts.push(n.dialin_config_id ? 'Enabled' : 'Disabled');
+    if (n.cancel_pending) statusParts.push('Cancel pending');
+    var status = statusParts.join(' · ');
+    var created = n.created_at ? new Date(n.created_at).toLocaleString() : '';
+
+    html += `
+      <tr>
+        <td><input type="checkbox" class="admin-global-ai-number-checkbox" value="${n.id}"></td>
+        <td>${n.id}</td>
+        <td>${escapeHtml(n.phone_number || '')}</td>
+        <td>${escapeHtml(userLabel)}</td>
+        <td>${escapeHtml(agentLabel)}</td>
+        <td>${escapeHtml(status)}</td>
+        <td>${created}</td>
+      </tr>
+    `;
+  });
+
+  html += '</tbody></table>';
+
+  html += `
+    <div class="pagination">
+      <button ${aiNumbersPagination.page === 0 ? 'disabled' : ''} onclick="loadAllAiNumbers(${aiNumbersPagination.page - 1})">Prev</button>
+      <span>Page ${aiNumbersPagination.page + 1} of ${aiNumbersPagination.totalPages || 1} (${aiNumbersPagination.total || 0} total)</span>
+      <button ${aiNumbersPagination.page >= (aiNumbersPagination.totalPages - 1) ? 'disabled' : ''} onclick="loadAllAiNumbers(${aiNumbersPagination.page + 1})">Next</button>
+    </div>
+    <div style="margin-top:8px;text-align:right;">
+      <button class="btn--danger btn--sm" onclick="deleteSelectedGlobalAiNumbers()">Delete selected AI numbers</button>
+    </div>
+  `;
+
+  document.getElementById('aiNumbersTableContainer').innerHTML = html;
+}
+
+function toggleGlobalAiNumbersSelectAll(master) {
+  var boxes = document.querySelectorAll('#aiNumbersTableContainer input.admin-global-ai-number-checkbox');
+  boxes.forEach(function(b){ b.checked = !!master.checked; });
+}
+
+async function deleteSelectedGlobalAiNumbers() {
+  var ids = getSelectedGlobalAiNumberIds();
+  if (!ids.length) {
+    showAdminToast('Select at least one AI number to delete.', 'error');
+    return;
+  }
+  if (!confirm('Delete ' + ids.length + ' AI number(s)? This will release the numbers from Daily (best-effort) and cannot be undone.')) return;
+  try {
+    for (const id of ids) {
+      var res = await fetch('/api/admin/ai/numbers/' + encodeURIComponent(id), { method: 'DELETE' });
+      var data = await res.json().catch(function(){ return null; });
+      if (!res.ok || !data || data.success === false) {
+        var msg = (data && data.message) || ('Failed to delete AI number ' + id);
+        throw new Error(msg);
+      }
+    }
+    showAdminToast('Delete requested for ' + ids.length + ' AI number(s).', 'success');
+    loadAllAiNumbers(aiNumbersPagination.page || 0);
+  } catch (e) {
+    showAdminToast('Error deleting AI numbers: ' + e.message, 'error');
+  }
+}
+
+async function purgeAllAiNumbers() {
+  if (!confirm('This will remove ALL AI numbers for ALL users, release them in Daily (best-effort), and cannot be undone. Continue?')) return;
+  try {
+    var res = await fetch('/api/admin/ai/numbers/purge-all', { method: 'POST' });
+    var data = await res.json().catch(function(){ return null; });
+    if (!res.ok || !data || data.success === false) {
+      var msg = (data && data.message) || 'Failed to purge AI numbers';
+      throw new Error(msg);
+    }
+    showAdminToast(data.message || 'All AI numbers purged.', 'success');
+    loadAllAiNumbers(0);
+    loadStats();
+  } catch (e) {
+    showAdminToast('Error purging AI numbers: ' + e.message, 'error');
+  }
 }
 
 // Load users
