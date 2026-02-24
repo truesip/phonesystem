@@ -5041,6 +5041,9 @@ app.post('/api/admin/ai/numbers/:id/enable', requireAdmin, async (req, res) => {
 });
 
 // Admin API: Delete AI number (release from Daily)
+// NOTE: Admin deletes are allowed even if the number is younger than 28 days.
+// We perform best-effort cleanup in Daily but do not block database deletion
+// if Daily rejects the release due to its own minimum-age policies.
 app.delete('/api/admin/ai/numbers/:id', requireAdmin, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
@@ -5053,19 +5056,7 @@ app.delete('/api/admin/ai/numbers/:id', requireAdmin, async (req, res) => {
     const num = rows && rows[0];
     if (!num) return res.status(404).json({ success: false, message: 'AI number not found' });
 
-    const createdAt = num.created_at ? new Date(num.created_at) : null;
-    const now = new Date();
-    const ageInDays = createdAt ? Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)) : 0;
-    const MIN_AGE_DAYS = 28;
-
-    if (ageInDays < MIN_AGE_DAYS) {
-      const daysRemaining = MIN_AGE_DAYS - ageInDays;
-      return res.status(400).json({
-        success: false,
-        message: `This number cannot be deleted yet. Daily phone numbers can only be released after ${MIN_AGE_DAYS} days. Please wait ${daysRemaining} more day${daysRemaining === 1 ? '' : 's'}.`
-      });
-    }
-
+    // Best-effort: remove dial-in config if present
     if (num.dialin_config_id) {
       try {
         await dailyDeleteDialinConfig(num.dialin_config_id);
@@ -5074,12 +5065,16 @@ app.delete('/api/admin/ai/numbers/:id', requireAdmin, async (req, res) => {
       }
     }
 
-    try {
-      await dailyReleasePhoneNumber(num.daily_number_id);
-    } catch (e) {
-      const msg = e?.message || 'Failed to release phone number from Daily';
-      if (DEBUG) console.error('[admin.ai.numbers.delete] Daily release failed:', e?.data || msg);
-      return res.status(502).json({ success: false, message: msg });
+    // Best-effort: release the Daily phone number. If Daily rejects (e.g. <28 days),
+    // log the error but still delete our local record so the admin can clean up.
+    if (num.daily_number_id) {
+      try {
+        await dailyReleasePhoneNumber(num.daily_number_id);
+      } catch (e) {
+        const msg = e?.message || 'Failed to release phone number from Daily';
+        if (DEBUG) console.error('[admin.ai.numbers.delete] Daily release failed:', e?.data || msg);
+        // Do not return an error here; continue with local deletion.
+      }
     }
 
     await pool.execute('DELETE FROM ai_numbers WHERE id = ?', [numberId]);
