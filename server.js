@@ -15544,7 +15544,9 @@ async function handleNyvaPayCheckout(req, res) {
     const orderId = `nv-${userId}-${billingId}`;
 
     const baseUrl = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-    const webhookUrl = joinUrl(baseUrl, '/webhooks/nyvapay');
+    // NyvaPay should call the public webhook endpoint at app.callchimp.site
+    // Allow override via env NYVAPAY_WEBHOOK_URL if needed.
+    const webhookUrl = process.env.NYVAPAY_WEBHOOK_URL || 'https://app.callchimp.site/webhooks/nyvapay';
     const successUrl = joinUrl(baseUrl, '/dashboard?payment=success&method=card');
 
     const client = nyvaPayAxios();
