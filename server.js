@@ -4075,7 +4075,9 @@ app.get('/dashboard', requireAuth, (req, res) => {
     ? !!String(STRIPE_SECRET_KEY || '').trim()
     : cardProvider === 'square'
       ? (!!String(SQUARE_ACCESS_TOKEN || '').trim() && !!String(SQUARE_APPLICATION_ID || '').trim())
-      : false;
+      : cardProvider === 'nyvapay'
+        ? (!!String(NYVAPAY_MERCHANT_EMAIL || '').trim() && !!String(NYVAPAY_API_KEY || '').trim())
+        : false;
 
   const addFundsMethods = [];
   if (cardConfigured) {
@@ -4083,7 +4085,9 @@ app.get('/dashboard', requireAuth, (req, res) => {
       ? 'Card (Stripe)'
       : cardProvider === 'square'
         ? 'Card (Square)'
-        : 'Card';
+        : cardProvider === 'nyvapay'
+          ? 'Card (NyvaPay)'
+          : 'Card';
     addFundsMethods.push({
       value: 'card',
       label: cardLabel,
@@ -15479,6 +15483,124 @@ async function handleSquareCheckout(req, res) {
   }
 }
 
+// Create a NyvaPay payment-link checkout for card payments
+// Returns a hosted NyvaPay URL where the user can pay with card.
+async function handleNyvaPayCheckout(req, res) {
+  let billingId = null;
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (!NYVAPAY_MERCHANT_EMAIL || !NYVAPAY_API_KEY) {
+      return res.status(500).json({ success: false, message: 'Card payments are not configured' });
+    }
+
+    const userId = req.session.userId;
+    const { amount } = req.body || {};
+
+    const amountNum = parseFloat(amount);
+    if (!Number.isFinite(amountNum)) {
+      return res.status(400).json({ success: false, message: 'Invalid amount' });
+    }
+    if (amountNum < CHECKOUT_MIN_AMOUNT || amountNum > CHECKOUT_MAX_AMOUNT) {
+      return res.status(400).json({ success: false, message: `Amount must be between $${CHECKOUT_MIN_AMOUNT} and $${CHECKOUT_MAX_AMOUNT}` });
+    }
+
+    // Fetch user info for description + customer fields
+    let username = '';
+    let firstName = '';
+    let lastName = '';
+    let userEmail = '';
+    try {
+      const [rows] = await pool.execute('SELECT username, firstname, lastname, email FROM signup_users WHERE id=? LIMIT 1', [userId]);
+      if (rows && rows[0]) {
+        if (rows[0].username) username = String(rows[0].username);
+        if (rows[0].firstname) firstName = String(rows[0].firstname);
+        if (rows[0].lastname) lastName = String(rows[0].lastname);
+        if (rows[0].email) userEmail = String(rows[0].email);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[nyvapay.checkout] Failed to fetch user info:', e.message || e);
+    }
+    const baseUser = username || (req.session.username || 'unknown');
+    const fullName = `${firstName || ''} ${lastName || ''}`.trim();
+    const displayName = fullName || baseUser;
+
+    // Insert pending billing record (we will mark completed after successful webhook).
+    // billing_history.id is our invoice number.
+    // Use a non-null placeholder description to satisfy NOT NULL constraint; we'll
+    // update it with the final invoice-based description immediately afterwards.
+    const nyvapayPlaceholderDesc = 'Pending card refill (NyvaPay)';
+    const [insertResult] = await pool.execute(
+      'INSERT INTO billing_history (user_id, amount, description, balance_before, balance_after, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, amountNum, nyvapayPlaceholderDesc, 0, 0, 'pending']
+    );
+    billingId = insertResult.insertId;
+
+    const desc = buildRefillDescription(billingId);
+    try {
+      await pool.execute('UPDATE billing_history SET description = ? WHERE id = ?', [desc, billingId]);
+    } catch {}
+
+    // Build deterministic local order_id encoding userId + billingId for correlation with NyvaPay
+    const orderId = `nv-${userId}-${billingId}`;
+
+    const baseUrl = PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const webhookUrl = joinUrl(baseUrl, '/webhooks/nyvapay');
+    const successUrl = joinUrl(baseUrl, '/dashboard?payment=success&method=card');
+
+    const client = nyvaPayAxios();
+    const payload = {
+      amount: Number(amountNum.toFixed(2)),
+      currency: 'USD',
+      product_name: (desc || `Phone.System refill #${billingId}`).substring(0, 120),
+      note: orderId,
+      customer_email: userEmail || undefined,
+      customer_name: displayName || undefined,
+      webhook_url: webhookUrl,
+      success_redirect_url: successUrl,
+    };
+
+    if (DEBUG) console.log('[nyvapay.checkout] Creating payment link:', { orderId, amountNum });
+    const resp = await client.post('/merchant/payment-links', payload);
+    const data = resp?.data || {};
+
+    const paymentUrl = data.payment_url || data.url || data.checkout_url || data.link || null;
+    const paymentLinkId = data.id || data.payment_link_id || data.reference || orderId;
+
+    if (!paymentUrl) {
+      if (DEBUG) console.error('[nyvapay.checkout] Missing payment link URL in response:', data);
+      await pool.execute(
+        'UPDATE billing_history SET status = ?, error = ? WHERE id = ?',
+        ['failed', JSON.stringify(data), billingId]
+      );
+      return res.status(502).json({ success: false, message: 'Card payment provider did not return a checkout URL' });
+    }
+
+    // Record NyvaPay payment link for tracking/idempotency
+    try {
+      await pool.execute(
+        'INSERT INTO nyvapay_payments (user_id, payment_link_id, order_id, nyvapay_payment_id, amount, currency, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
+        [userId, String(paymentLinkId), String(orderId), null, amountNum, 'USD', 'pending', JSON.stringify(data)]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[nyvapay.checkout] Failed to insert nyvapay_payments row:', e.message || e);
+      // Do not fail the checkout creation if this insert fails; webhook can still be correlated via orderId in note.
+    }
+
+    return res.json({ success: true, payment_url: paymentUrl });
+  } catch (e) {
+    if (billingId && pool) {
+      try {
+        await pool.execute(
+          'UPDATE billing_history SET status = ?, error = ? WHERE id = ?',
+          ['failed', String(e?.message || e), billingId]
+        );
+      } catch {}
+    }
+    if (DEBUG) console.error('[nyvapay.checkout] error:', e.response?.data || e.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to create card payment' });
+  }
+}
+
 // Create a Stripe Checkout Session (hosted) for card payments
 // Returns a hosted Stripe URL where the user can pay with card.
 async function handleStripeCheckout(req, res) {
@@ -15600,11 +15722,12 @@ async function handleStripeCheckout(req, res) {
   }
 }
 
-// Provider switch: choose Square or Stripe for card checkout
+// Provider switch: choose Square, Stripe, or NyvaPay for card checkout
 app.post('/api/me/card/checkout', requireAuth, async (req, res) => {
   const provider = String(process.env.CARD_PAYMENT_PROVIDER || CARD_PAYMENT_PROVIDER || 'square').trim().toLowerCase();
   if (provider === 'stripe') return handleStripeCheckout(req, res);
   if (provider === 'square') return handleSquareCheckout(req, res);
+  if (provider === 'nyvapay') return handleNyvaPayCheckout(req, res);
   return res.status(500).json({ success: false, message: 'Card payment provider is not configured' });
 });
 
@@ -16502,6 +16625,238 @@ app.post('/webhooks/billcom', async (req, res) => {
     return res.status(200).json({ success: true });
   } catch (e) {
     if (DEBUG) console.error('[billcom.webhook] Unhandled error:', e.message || e);
+    return res.status(500).json({ success: false, message: 'Webhook handling failed' });
+  }
+});
+
+// NyvaPay webhook for card payments (payment link callbacks)
+// Configure NyvaPay to POST payment status updates to PUBLIC_BASE_URL + /webhooks/nyvapay
+app.post('/webhooks/nyvapay', async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ success: false, message: 'Database not configured' });
+    }
+
+    const p = req.body || {};
+    const orderId = String(
+      p.order_id ||
+      p.orderId ||
+      (typeof p.note === 'string' ? p.note : '') ||
+      (p.metadata && (p.metadata.order_id || p.metadata.orderId)) ||
+      ''
+    ).trim();
+
+    if (!orderId) {
+      if (DEBUG) console.warn('[nyvapay.webhook] Missing order identifier (order_id/note) in payload');
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const m = /^nv-(\d+)-(\d+)$/.exec(orderId);
+    if (!m) {
+      if (DEBUG) console.warn('[nyvapay.webhook] orderId does not match expected pattern:', orderId);
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const userId = Number(m[1]);
+    const billingId = Number(m[2]);
+
+    // Fetch billing_history row
+    const [billingRows] = await pool.execute(
+      'SELECT id, user_id, amount, description, status FROM billing_history WHERE id = ? LIMIT 1',
+      [billingId]
+    );
+    const billing = billingRows && billingRows[0] ? billingRows[0] : null;
+    if (!billing || String(billing.user_id) !== String(userId)) {
+      if (DEBUG) console.warn('[nyvapay.webhook] Billing row not found or user mismatch for order:', { orderId, userId, billingId });
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    // Upsert nyvapay_payments row for tracking
+    let existing = null;
+    try {
+      const [rows] = await pool.execute(
+        'SELECT * FROM nyvapay_payments WHERE order_id = ? LIMIT 1',
+        [orderId]
+      );
+      existing = rows && rows[0] ? rows[0] : null;
+    } catch (e) {
+      if (DEBUG) console.warn('[nyvapay.webhook] Failed to select nyvapay_payments row:', e.message || e);
+    }
+
+    const paymentStatusRaw = String(p.status || p.payment_status || p.state || '').toLowerCase();
+    const payloadJson = JSON.stringify(p);
+    const nyvapayPaymentId = p.payment_id || p.id || p.tx_id || null;
+
+    if (existing) {
+      try {
+        await pool.execute(
+          'UPDATE nyvapay_payments SET nyvapay_payment_id = COALESCE(?, nyvapay_payment_id), status = ?, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [nyvapayPaymentId, paymentStatusRaw || existing.status || 'unknown', payloadJson, existing.id]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[nyvapay.webhook] Failed to update nyvapay_payments row:', e.message || e);
+      }
+    } else {
+      try {
+        const amount = Number(billing.amount || 0);
+        await pool.execute(
+          'INSERT INTO nyvapay_payments (user_id, payment_link_id, order_id, nyvapay_payment_id, amount, currency, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
+          [userId, orderId, orderId, nyvapayPaymentId, amount, 'USD', paymentStatusRaw || 'pending', payloadJson]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[nyvapay.webhook] Failed to insert nyvapay_payments row:', e.message || e);
+      }
+    }
+
+    // Determine high-level state
+    const status = paymentStatusRaw;
+    const successStatuses = ['paid', 'completed', 'success', 'succeeded'];
+    const pendingStatuses = ['pending', 'processing', 'awaiting_payment', 'in_progress'];
+    const failureStatuses = ['failed', 'cancelled', 'canceled', 'expired', 'error', 'refunded', 'chargeback'];
+
+    if (pendingStatuses.includes(status)) {
+      if (DEBUG) console.log('[nyvapay.webhook] Payment not completed yet, status=', status || 'unknown');
+      return res.status(200).json({ success: true, pending: true });
+    }
+
+    if (failureStatuses.includes(status)) {
+      // Terminal failure: mark billing as failed if not already completed
+      try {
+        const [bRows] = await pool.execute(
+          'SELECT id, user_id, status FROM billing_history WHERE id = ? LIMIT 1',
+          [billingId]
+        );
+        const bRow = bRows && bRows[0] ? bRows[0] : null;
+        if (bRow && String(bRow.user_id) === String(userId) && bRow.status !== 'completed') {
+          await pool.execute(
+            'UPDATE billing_history SET status = ?, error = ? WHERE id = ?',
+            ['failed', payloadJson, billingId]
+          );
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[nyvapay.webhook] Failed to mark billing as failed for order:', orderId, e.message || e);
+      }
+
+      try {
+        await pool.execute(
+          'UPDATE nyvapay_payments SET status = ?, credited = 0, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ?',
+          [status || 'failed', payloadJson, orderId]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[nyvapay.webhook] Failed to update nyvapay_payments for failed status:', e.message || e);
+      }
+
+      if (DEBUG) console.log('[nyvapay.webhook] Terminal status, marking failed:', { orderId, status });
+      return res.status(200).json({ success: true, failed: true });
+    }
+
+    if (!successStatuses.includes(status)) {
+      // Unknown status: treat as pending to avoid accidental credits.
+      if (DEBUG) console.log('[nyvapay.webhook] Unknown status, treating as pending:', { orderId, status });
+      return res.status(200).json({ success: true, pending: true });
+    }
+
+    // Acquire a per-order lock to prevent double-crediting the same NyvaPay payment.
+    let lockAcquired = false;
+    try {
+      const [lockResult] = await pool.execute(
+        'UPDATE nyvapay_payments SET credited = 2, status = ? WHERE order_id = ? AND credited = 0',
+        ['PROCESSING', orderId]
+      );
+      lockAcquired = !!(lockResult && lockResult.affectedRows > 0);
+    } catch (e) {
+      if (DEBUG) console.warn('[nyvapay.webhook] Failed to acquire processing lock:', e.message || e);
+    }
+
+    if (!lockAcquired) {
+      // Someone else has already processed or is processing this order.
+      try {
+        const [rows] = await pool.execute(
+          'SELECT credited FROM nyvapay_payments WHERE order_id = ? LIMIT 1',
+          [orderId]
+        );
+        const creditedVal = rows && rows[0] ? Number(rows[0].credited || 0) : 0;
+        if (creditedVal === 1) {
+          if (DEBUG) console.log('[nyvapay.webhook] Order already credited, skipping duplicate:', { orderId, billingId });
+          return res.status(200).json({ success: true, alreadyCredited: true });
+        }
+        if (DEBUG) console.log('[nyvapay.webhook] Order is being processed by another handler, skipping duplicate:', { orderId, billingId, credited: creditedVal });
+        return res.status(200).json({ success: true, pending: true, duplicate: true });
+      } catch (e) {
+        if (DEBUG) console.warn('[nyvapay.webhook] Failed to re-read nyvapay_payments for lock check:', e.message || e);
+        // Do not risk double-charging if we are unsure.
+        return res.status(200).json({ success: true, pending: true });
+      }
+    }
+
+    // If billing row is already completed, treat this as already credited.
+    if (billing.status === 'completed') {
+      if (DEBUG) console.log('[nyvapay.webhook] Billing already completed, skipping refill:', { billingId, orderId });
+      try {
+        await pool.execute(
+          'UPDATE nyvapay_payments SET credited = 1, status = ?, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ? AND credited <> 1',
+          ['COMPLETED', payloadJson, orderId]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[nyvapay.webhook] Failed to sync credited flag for already-completed billing:', e.message || e);
+      }
+      return res.status(200).json({ success: true, alreadyCredited: true });
+    }
+
+    const desc = billing.description || p.description || p.note || `NyvaPay payment for order ${orderId}`;
+
+    // Complete the existing invoice row in billing_history (no separate creditBalance row).
+    const completeResult = await completeBillingInvoice({
+      userId,
+      billingId,
+      paymentMethod: 'card',
+      referenceId: nyvapayPaymentId || 'N/A',
+      descriptionOverride: desc,
+      transactionType: 'credit'
+    });
+
+    if (!completeResult.success) {
+      if (DEBUG) {
+        console.error('[nyvapay.webhook] Failed to complete billing invoice for order:', {
+          orderId,
+          billingId,
+          userId,
+          error: completeResult.error
+        });
+      }
+      // Release the processing lock so a future retry can attempt again.
+      try {
+        await pool.execute(
+          'UPDATE nyvapay_payments SET credited = 0, status = ? WHERE order_id = ? AND credited = 2',
+          ['FAILED', orderId]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[nyvapay.webhook] Failed to revert credited flag after error:', e.message || e);
+      }
+      return res.status(500).json({ success: false, message: 'Failed to complete billing' });
+    }
+
+    // Mark as credited and save latest payload
+    try {
+      await pool.execute(
+        'UPDATE nyvapay_payments SET credited = 1, status = ?, nyvapay_payment_id = COALESCE(?, nyvapay_payment_id), raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE order_id = ?',
+        ['COMPLETED', nyvapayPaymentId, payloadJson, orderId]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[nyvapay.webhook] Failed to mark payment as credited:', e.message || e);
+    }
+
+    // Best-effort: send refill receipt email for this invoice.
+    try {
+      await sendRefillReceiptForBillingId(billingId);
+    } catch (e) {
+      if (DEBUG) console.warn('[nyvapay.webhook] Failed to send refill receipt:', e.message || e);
+    }
+
+    if (DEBUG) console.log('[nyvapay.webhook] Successfully credited order:', { orderId, billingId, userId });
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[nyvapay.webhook] Unhandled error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Webhook handling failed' });
   }
 });
