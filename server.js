@@ -3721,6 +3721,10 @@ async function generateInvoicePdfBufferForBillingRow(billingRow) {
   // Invoice label and meta
   const invNumber = billingRow.id;
   const createdAt = billingRow.created_at ? new Date(billingRow.created_at) : new Date();
+  const statusRaw = String(billingRow.status || '').toLowerCase();
+  const statusLabel = statusRaw === 'completed' ? 'PAID' : (statusRaw ? statusRaw.toUpperCase() : 'PAID');
+  const paymentMethod = String(billingRow.payment_method || '').trim();
+  const referenceId = String(billingRow.reference_id || '').trim();
 
   doc.font('Helvetica-Bold').fontSize(18).text('INVOICE', headerLeftX, 120);
   doc.moveDown();
@@ -3728,19 +3732,36 @@ async function generateInvoicePdfBufferForBillingRow(billingRow) {
   doc.font('Helvetica').fontSize(10);
   doc.text(`Invoice #: ${invNumber}`, headerLeftX, 150);
   doc.text(`Date: ${createdAt.toLocaleDateString()}`, headerLeftX, 165);
+  doc.text(`Status: ${statusLabel}`, headerLeftX, 180);
 
   // Bill To
   const customerNameParts = [billingRow.firstname, billingRow.lastname].filter(Boolean).map((s) => String(s).trim());
   const customerName = (customerNameParts.length ? customerNameParts.join(' ') : '') || billingRow.username || 'Customer';
   const customerEmail = billingRow.email || '';
 
-  doc.font('Helvetica-Bold').fontSize(11).text('Bill To:', headerLeftX, 195);
+  const billToTop = 210;
+  doc.font('Helvetica-Bold').fontSize(11).text('Bill To:', headerLeftX, billToTop - 15);
   doc.font('Helvetica').fontSize(10);
-  doc.text(customerName, headerLeftX, 210);
-  if (customerEmail) doc.text(customerEmail, headerLeftX, 225);
+  let billY = billToTop;
+  doc.text(customerName, headerLeftX, billY); billY += 15;
+  if (customerEmail) { doc.text(customerEmail, headerLeftX, billY); billY += 15; }
+
+  // Customer address (if available)
+  const addr1 = String(billingRow.address1 || '').trim();
+  const addr2 = String(billingRow.address2 || '').trim();
+  const city = String(billingRow.city || '').trim();
+  const state = String(billingRow.state || '').trim();
+  const postal = String(billingRow.postal_code || '').trim();
+  const country = String(billingRow.country || '').trim();
+
+  if (addr1) { doc.text(addr1, headerLeftX, billY); billY += 15; }
+  if (addr2) { doc.text(addr2, headerLeftX, billY); billY += 15; }
+  const cityLineParts = [city, state, postal].filter(Boolean);
+  if (cityLineParts.length) { doc.text(cityLineParts.join(', '), headerLeftX, billY); billY += 15; }
+  if (country) { doc.text(country, headerLeftX, billY); billY += 15; }
 
   // Simple line item table
-  const tableTop = 260;
+  const tableTop = billY + 20;
   const desc = billingRow.description || buildRefillDescription(invNumber);
   const amount = Number(billingRow.amount || 0) || 0;
   const amountStr = `$${amount.toFixed(2)}`;
@@ -3762,8 +3783,21 @@ async function generateInvoicePdfBufferForBillingRow(billingRow) {
   doc.text('Total', 320, totalsTop + 10, { width: 150, align: 'left' });
   doc.text(amountStr, 380, totalsTop + 10, { width: 150, align: 'right' });
 
+  // Payment details block (right side)
+  let metaY = totalsTop + 30;
+  if (paymentMethod) {
+    doc.font('Helvetica-Bold').fontSize(9).text('Payment Method:', 320, metaY, { width: 120, align: 'left' });
+    doc.font('Helvetica').fontSize(9).text(paymentMethod, 420, metaY, { width: 130, align: 'right' });
+    metaY += 14;
+  }
+  if (referenceId) {
+    doc.font('Helvetica-Bold').fontSize(9).text('Transaction ID:', 320, metaY, { width: 120, align: 'left' });
+    doc.font('Helvetica').fontSize(9).text(referenceId, 420, metaY, { width: 130, align: 'right' });
+    metaY += 14;
+  }
+
   doc.font('Helvetica').fontSize(9).fillColor('#555555');
-  doc.text('Thank you for your payment.', headerLeftX, totalsTop + 60);
+  doc.text('Thank you for your payment.', headerLeftX, metaY + 30);
   doc.fillColor('black');
 
   doc.end();
@@ -3782,7 +3816,8 @@ async function sendRefillReceiptForBillingId(billingId) {
     const [rows] = await pool.execute(
       `SELECT bh.id, bh.user_id, bh.amount, bh.description, bh.payment_method, bh.reference_id, bh.status,
               bh.created_at,
-              u.username, u.email, u.firstname, u.lastname
+              u.username, u.email, u.firstname, u.lastname,
+              u.address1, u.address2, u.city, u.state, u.postal_code, u.country
          FROM billing_history bh
          JOIN signup_users u ON u.id = bh.user_id
         WHERE bh.id = ?
