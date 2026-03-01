@@ -7592,9 +7592,15 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-        const j = await r.json();
 
-        if (!j || j.success === false) {
+        let j = null;
+        try {
+          j = await r.json();
+        } catch (parseErr) {
+          console.error('[addFunds] Failed to parse JSON response from', endpoint, parseErr);
+        }
+
+        if (!j || j.success === false || !r.ok) {
           // Derive a helpful error message, including any provider_error details from the backend.
           let providerDetail = '';
           if (j && j.provider_error) {
