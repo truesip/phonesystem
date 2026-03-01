@@ -103,7 +103,7 @@ The integration assumes two core concepts:
    - One row per refill / invoice in *your* system.
 
 2. **NyvaPay tracking row** in a dedicated table (e.g. `nyvapay_payments`):
-   - `user_id`, `order_id`, `payment_link_id`, `nyvapay_payment_id`, `amount`, `currency`, `status`, `credited`, `raw_payload`, timestamps.
+   - `user_id`, `order_id`, `payment_link_id`, `nyvapay_payment_id` (typically NyvaPay's `transaction_id`), `amount`, `currency`, `product_name`, `external_order_ref` (NyvaPay's `order` field), `note`, `customer_email`, `customer_name`, `status`, `credited`, `raw_payload`, timestamps.
    - One row per NyvaPay payment link, used for idempotency and reporting.
 
 Example SQL schema for `nyvapay_payments`:
@@ -117,13 +117,18 @@ CREATE TABLE IF NOT EXISTS nyvapay_payments (
   nyvapay_payment_id VARCHAR(191) NULL,
   amount             DECIMAL(10,2) NOT NULL DEFAULT 0.00,
   currency           VARCHAR(16) NOT NULL DEFAULT 'USD',
+  product_name       VARCHAR(255) NULL,
+  external_order_ref VARCHAR(191) NULL,
+  note               TEXT NULL,
+  customer_email     VARCHAR(255) NULL,
+  customer_name      VARCHAR(255) NULL,
   status             VARCHAR(64) NOT NULL DEFAULT 'pending',
   credited           TINYINT NOT NULL DEFAULT 0, -- 0=not, 1=credited, 2=processing
   raw_payload        JSON NULL,
   created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_user_id (user_id),
-  UNIQUE KEY uniq_order_id (order_id)
+  INDEX idx_order_id (order_id)
 );
 ```
 
@@ -188,7 +193,7 @@ When a user chooses to pay with card via NyvaPay:
    - Return an error to the client.
 
 7. Insert a row into `nyvapay_payments` with:
-   - `user_id`, `order_id`, `payment_link_id`, `amount`, `currency`, `status='pending'`, `credited=0`, `raw_payload`.
+   - `user_id`, `order_id`, `payment_link_id`, `amount`, `currency`, basic metadata such as `product_name`, `note`, `customer_email`, `customer_name`, `status='pending'`, `credited=0`, `raw_payload`.
 
 8. Return `paymentUrl` to the frontend so it can redirect or open it.
 
@@ -202,17 +207,36 @@ Configure your NyvaPay account to POST events to `NYVAPAY_WEBHOOK_URL`, which sh
 POST https://yourdomain.com/webhooks/nyvapay
 ```
 
+NyvaPay's webhook payload typically includes both payment status and customer/product metadata, for example:
+
+```json
+{
+  "event": "payment.succeeded",
+  "payment_request_id": "uuid",
+  "amount": 29.99,
+  "currency": "USD",
+  "product_name": "Car Wash",
+  "order": "#ZE-127993",
+  "status": "paid",
+  "note": "Optional note",
+  "customer_email": "buyer@example.com",
+  "customer_name": "Jane Doe",
+  "transaction_id": "uuid"
+}
+```
+
 The handler must:
 
 1. **Parse `order_id`** from the payload. Look at multiple places:
    - `payload.order_id`
    - `payload.orderId`
    - `payload.metadata.order_id`
-   - `payload.note` (if you embed `Order nv-...` in the note)
+   - `payload.note` (if you embed `nv-<userId>-<invoiceId>` in the note)
+   - `payload.order` (if you choose to send your internal order id there)
 
 2. Validate the format, e.g. `nv-<userId>-<invoiceId>`, and parse both IDs.
 
-3. Normalize NyvaPays status into three buckets:
+3. Normalize NyvaPay's status into three buckets:
 
    - **Success**: `paid`, `completed`, `success`, `succeeded`
    - **Pending**: `pending`, `processing`, `awaiting_payment`, `in_progress`
@@ -221,6 +245,12 @@ The handler must:
 4. **Upsert** a row into `nyvapay_payments` using `order_id` as the unique key:
    - Update `status`, `nyvapay_payment_id`, `amount`, etc.
    - Store the raw payload in `raw_payload`.
+   - Persist useful metadata fields into dedicated columns, for example:
+     - `product_name` → `product_name`
+     - `order` → `external_order_ref`
+     - `note` → `note`
+     - `customer_email` → `customer_email`
+     - `customer_name` → `customer_name`
 
 5. If state is **pending**:
    - Update status and return 200 with `{ pending: true }`.

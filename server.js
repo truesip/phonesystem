@@ -1778,6 +1778,11 @@ async function initDb() {
     nyvapay_payment_id VARCHAR(191) NULL,
     amount DECIMAL(10,2) NOT NULL,
     currency VARCHAR(16) NOT NULL DEFAULT 'USD',
+    product_name VARCHAR(255) NULL,
+    external_order_ref VARCHAR(191) NULL,
+    note TEXT NULL,
+    customer_email VARCHAR(255) NULL,
+    customer_name VARCHAR(255) NULL,
     status VARCHAR(64) NOT NULL DEFAULT 'pending',
     credited TINYINT(1) NOT NULL DEFAULT 0,
     raw_payload JSON NULL,
@@ -1788,6 +1793,28 @@ async function initDb() {
     KEY idx_nyvapay_order (order_id),
     FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
+
+  // Ensure nyvapay_payments has optional metadata columns for product and customer details
+  for (const colDef of [
+    { name: 'product_name', ddl: "ALTER TABLE nyvapay_payments ADD COLUMN product_name VARCHAR(255) NULL AFTER currency" },
+    { name: 'external_order_ref', ddl: "ALTER TABLE nyvapay_payments ADD COLUMN external_order_ref VARCHAR(191) NULL AFTER product_name" },
+    { name: 'note', ddl: "ALTER TABLE nyvapay_payments ADD COLUMN note TEXT NULL AFTER external_order_ref" },
+    { name: 'customer_email', ddl: "ALTER TABLE nyvapay_payments ADD COLUMN customer_email VARCHAR(255) NULL AFTER note" },
+    { name: 'customer_name', ddl: "ALTER TABLE nyvapay_payments ADD COLUMN customer_name VARCHAR(255) NULL AFTER customer_email" },
+  ]) {
+    try {
+      const [hasCol] = await pool.query(
+        'SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=\'nyvapay_payments\' AND column_name=? LIMIT 1',
+        [dbName, colDef.name]
+      );
+      if (!hasCol || !hasCol.length) {
+        await pool.query(colDef.ddl);
+        if (DEBUG) console.log('[schema] Added nyvapay_payments column:', colDef.name);
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[schema] nyvapay_payments column check failed:', colDef.name, e.message || e);
+    }
+  }
 
   // Stripe payments table - tracks card payments (Stripe Checkout) and credits
   await pool.query(`CREATE TABLE IF NOT EXISTS stripe_payments (
@@ -16138,8 +16165,22 @@ async function handleNyvaPayCheckout(req, res) {
     // Record NyvaPay payment link for tracking/idempotency
     try {
       await pool.execute(
-        'INSERT INTO nyvapay_payments (user_id, payment_link_id, order_id, nyvapay_payment_id, amount, currency, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
-        [userId, String(paymentLinkId), String(orderId), null, amountNum, 'USD', 'pending', JSON.stringify(data)]
+        'INSERT INTO nyvapay_payments (user_id, payment_link_id, order_id, nyvapay_payment_id, amount, currency, product_name, external_order_ref, note, customer_email, customer_name, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
+        [
+          userId,
+          String(paymentLinkId),
+          String(orderId),
+          null,
+          amountNum,
+          'USD',
+          payload.product_name || null,
+          null,
+          payload.note || null,
+          userEmail || null,
+          displayName || null,
+          'pending',
+          JSON.stringify(data),
+        ]
       );
     } catch (e) {
       if (DEBUG) console.warn('[nyvapay.checkout] Failed to insert nyvapay_payments row:', e.message || e);
@@ -17203,6 +17244,7 @@ app.post('/webhooks/nyvapay', async (req, res) => {
       p.orderId ||
       (typeof p.note === 'string' ? p.note : '') ||
       (p.metadata && (p.metadata.order_id || p.metadata.orderId)) ||
+      (typeof p.order === 'string' ? p.order : '') ||
       ''
     ).trim();
 
@@ -17243,6 +17285,12 @@ app.post('/webhooks/nyvapay', async (req, res) => {
       if (DEBUG) console.warn('[nyvapay.webhook] Failed to select nyvapay_payments row:', e.message || e);
     }
 
+    const productName = typeof p.product_name === 'string' ? p.product_name.trim() : null;
+    const externalOrderRef = typeof p.order === 'string' ? p.order.trim() : null;
+    const note = typeof p.note === 'string' ? p.note.trim() : null;
+    const customerEmail = typeof p.customer_email === 'string' ? p.customer_email.trim() : null;
+    const customerName = typeof p.customer_name === 'string' ? p.customer_name.trim() : null;
+
     const paymentStatusRaw = String(p.status || p.payment_status || p.state || '').toLowerCase();
     const payloadJson = JSON.stringify(p);
     // Prefer transaction_id from NyvaPay docs, fall back to other common fields
@@ -17256,8 +17304,18 @@ app.post('/webhooks/nyvapay', async (req, res) => {
     if (existing) {
       try {
         await pool.execute(
-          'UPDATE nyvapay_payments SET nyvapay_payment_id = COALESCE(?, nyvapay_payment_id), status = ?, raw_payload = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-          [nyvapayPaymentId, paymentStatusRaw || existing.status || 'unknown', payloadJson, existing.id]
+          'UPDATE nyvapay_payments SET nyvapay_payment_id = COALESCE(?, nyvapay_payment_id), status = ?, raw_payload = ?, product_name = COALESCE(?, product_name), external_order_ref = COALESCE(?, external_order_ref), note = COALESCE(?, note), customer_email = COALESCE(?, customer_email), customer_name = COALESCE(?, customer_name), updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [
+            nyvapayPaymentId,
+            paymentStatusRaw || existing.status || 'unknown',
+            payloadJson,
+            productName,
+            externalOrderRef,
+            note,
+            customerEmail,
+            customerName,
+            existing.id,
+          ]
         );
       } catch (e) {
         if (DEBUG) console.warn('[nyvapay.webhook] Failed to update nyvapay_payments row:', e.message || e);
@@ -17266,8 +17324,22 @@ app.post('/webhooks/nyvapay', async (req, res) => {
       try {
         const amount = Number(billing.amount || 0);
         await pool.execute(
-          'INSERT INTO nyvapay_payments (user_id, payment_link_id, order_id, nyvapay_payment_id, amount, currency, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
-          [userId, orderId, orderId, nyvapayPaymentId, amount, 'USD', paymentStatusRaw || 'pending', payloadJson]
+          'INSERT INTO nyvapay_payments (user_id, payment_link_id, order_id, nyvapay_payment_id, amount, currency, product_name, external_order_ref, note, customer_email, customer_name, status, credited, raw_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
+          [
+            userId,
+            orderId,
+            orderId,
+            nyvapayPaymentId,
+            amount,
+            'USD',
+            productName,
+            externalOrderRef,
+            note,
+            customerEmail,
+            customerName,
+            paymentStatusRaw || 'pending',
+            payloadJson,
+          ]
         );
       } catch (e) {
         if (DEBUG) console.warn('[nyvapay.webhook] Failed to insert nyvapay_payments row:', e.message || e);
@@ -17369,7 +17441,16 @@ app.post('/webhooks/nyvapay', async (req, res) => {
       return res.status(200).json({ success: true, alreadyCredited: true });
     }
 
-    const desc = billing.description || p.description || p.note || `NyvaPay payment for order ${orderId}`;
+    let desc = billing.description || '';
+    if (!desc) {
+      const descParts = [];
+      if (productName) descParts.push(productName);
+      if (externalOrderRef) descParts.push(`Order ${externalOrderRef}`);
+      if (note && !/^nv-(\d+)-(\d+)$/.test(note)) descParts.push(note);
+      desc = descParts.filter(Boolean).join(' - ') || `NyvaPay payment for order ${orderId}`;
+    } else if (productName && !desc.includes(productName)) {
+      desc = `${desc} - ${productName}`;
+    }
 
     // Complete the existing invoice row in billing_history (no separate creditBalance row).
     const completeResult = await completeBillingInvoice({
