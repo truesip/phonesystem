@@ -7595,7 +7595,24 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         const j = await r.json();
 
         if (!j || j.success === false) {
-          const errMsg = j?.message || `${methodLabel} payment could not be started. Please try again.`;
+          // Derive a helpful error message, including any provider_error details from the backend.
+          let providerDetail = '';
+          if (j && j.provider_error) {
+            const pe = j.provider_error;
+            if (typeof pe === 'string') {
+              providerDetail = pe;
+            } else if (pe && typeof pe === 'object') {
+              if (typeof pe.error === 'string' && pe.error.trim()) {
+                providerDetail = pe.error.trim();
+              } else if (typeof pe.message === 'string' && pe.message.trim()) {
+                providerDetail = pe.message.trim();
+              }
+            }
+          }
+
+          const baseMsg = j?.message || `${methodLabel} payment could not be started. Please try again.`;
+          const errMsg = providerDetail ? `${baseMsg} (${providerDetail})` : baseMsg;
+
           if (fundStatusEl) { fundStatusEl.textContent = errMsg; fundStatusEl.style.display = 'block'; }
           showToast(errMsg, 'error');
           return;
@@ -7621,7 +7638,7 @@ $('#currentBalance').innerHTML = `Current Balance: <strong style=\"color:#facc15
         console.error('[addFunds]', e);
         const errMsg = 'Failed to start payment. Please try again.';
         if (fundStatusEl) { fundStatusEl.textContent = errMsg; fundStatusEl.style.display = 'block'; }
-        alert(errMsg);
+        showToast(errMsg, 'error');
       } finally {
         $('#confirmFundBtn').disabled = false;
         $('#confirmFundBtn').textContent = 'Continue';
