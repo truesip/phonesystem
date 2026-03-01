@@ -2117,6 +2117,13 @@ async function initDb() {
 
   // Per-user AI SMS settings (outbound sender numbers)
   await pool.query(`CREATE TABLE IF NOT EXISTS user_ai_sms_settings (
+    user_id BIGINT NOT NULL,
+    allowed_did_ids JSON NULL,
+    default_did_id VARCHAR(64) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id),
+    CONSTRAINT fk_user_ai_sms_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
   // Global invoice branding settings (business info + logo for PDF invoices)
@@ -2138,16 +2145,6 @@ async function initDb() {
     logo_filename VARCHAR(255) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-  )`);
-
-  // Per-user AI payment settings (Square/Stripe for invoicing callers)
-  await pool.query(`CREATE TABLE IF NOT EXISTS user_ai_payment_settings (
-    allowed_did_ids JSON NULL,
-    default_did_id VARCHAR(64) NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id),
-    CONSTRAINT fk_user_ai_sms_settings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
   )`);
 
   // Per-user physical mail return address (Click2Mail)
