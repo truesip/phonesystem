@@ -16189,16 +16189,38 @@ async function handleNyvaPayCheckout(req, res) {
 
     return res.json({ success: true, payment_url: paymentUrl });
   } catch (e) {
+    const providerStatus = e && e.response && typeof e.response.status === 'number'
+      ? e.response.status
+      : null;
+    const providerBody = e && e.response ? e.response.data : null;
+
+    // Persist rich provider error details on the billing row for debugging.
     if (billingId && pool) {
       try {
+        const errorPayload = {
+          provider: 'nyvapay',
+          status: providerStatus,
+          response: providerBody || null,
+          message: e?.message || String(e),
+        };
         await pool.execute(
           'UPDATE billing_history SET status = ?, error = ? WHERE id = ?',
-          ['failed', String(e?.message || e), billingId]
+          ['failed', JSON.stringify(errorPayload), billingId]
         );
       } catch {}
     }
-    if (DEBUG) console.error('[nyvapay.checkout] error:', e.response?.data || e.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to create card payment' });
+
+    if (DEBUG) {
+      console.error('[nyvapay.checkout] error:', providerBody || e.message || e);
+    }
+
+    const httpStatus = providerStatus && providerStatus >= 400 && providerStatus <= 599 ? 502 : 500;
+
+    return res.status(httpStatus).json({
+      success: false,
+      message: 'Card payment provider failed to create payment link',
+      provider_error: providerBody || { message: e?.message || String(e) },
+    });
   }
 }
 
