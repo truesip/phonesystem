@@ -17210,7 +17210,13 @@ app.post('/webhooks/nyvapay', async (req, res) => {
 
     const paymentStatusRaw = String(p.status || p.payment_status || p.state || '').toLowerCase();
     const payloadJson = JSON.stringify(p);
-    const nyvapayPaymentId = p.payment_id || p.id || p.tx_id || null;
+    // Prefer transaction_id from NyvaPay docs, fall back to other common fields
+    const nyvapayPaymentId =
+      p.transaction_id ||
+      p.payment_id ||
+      p.id ||
+      p.tx_id ||
+      null;
 
     if (existing) {
       try {
