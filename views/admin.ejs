@@ -593,8 +593,79 @@ async function loadStats() {
           <div class="stat-row"><span class="stat-label">Total Minutes</span><span class="stat-value">${num(stats.telephony.calls.minutes)}</span></div>
         </div>
       </div>
+      <div class="stats-grid" style="margin-top:16px">
+        <div class="stats-box">
+          <h4>Invoice Branding</h4>
+          <p class="muted" style="font-size:12px;margin-bottom:8px;">Customize the business information and logo that appear on PDF invoices sent to customers.</p>
+          <form id="invoiceBrandingForm" onsubmit="saveInvoiceBranding(event)">
+            <div class="modal-field">
+              <label>Business Name</label>
+              <input type="text" name="business_name" id="invoiceBusinessName" placeholder="Your company name" required>
+            </div>
+            <div class="modal-field">
+              <label>Business Email</label>
+              <input type="email" name="business_email" id="invoiceBusinessEmail" placeholder="billing@example.com">
+            </div>
+            <div class="modal-field">
+              <label>Business Phone</label>
+              <input type="text" name="business_phone" id="invoiceBusinessPhone" placeholder="+1 (555) 123-4567">
+            </div>
+            <div class="modal-field">
+              <label>Website</label>
+              <input type="text" name="business_website" id="invoiceBusinessWebsite" placeholder="https://yourdomain.com">
+            </div>
+            <div class="modal-field">
+              <label>Address Line 1</label>
+              <input type="text" name="address1" id="invoiceAddress1" placeholder="Street address">
+            </div>
+            <div class="modal-field">
+              <label>Address Line 2</label>
+              <input type="text" name="address2" id="invoiceAddress2" placeholder="Suite / Unit (optional)">
+            </div>
+            <div class="modal-field" style="display:flex;gap:6px;flex-wrap:wrap;">
+              <div style="flex:2 1 160px;">
+                <label>City</label>
+                <input type="text" name="city" id="invoiceCity" placeholder="City">
+              </div>
+              <div style="flex:1 1 100px;">
+                <label>State</label>
+                <input type="text" name="state" id="invoiceState" placeholder="State">
+              </div>
+              <div style="flex:1 1 100px;">
+                <label>Postal Code</label>
+                <input type="text" name="postal_code" id="invoicePostalCode" placeholder="ZIP / Postal">
+              </div>
+              <div style="flex:0 0 80px;">
+                <label>Country</label>
+                <input type="text" name="country" id="invoiceCountry" placeholder="US" maxlength="2">
+              </div>
+            </div>
+            <div class="modal-field">
+              <label>Tax ID (optional)</label>
+              <input type="text" name="tax_id" id="invoiceTaxId" placeholder="VAT / EIN / Tax registration number">
+            </div>
+            <div class="modal-field">
+              <label>Logo (for PDF header)</label>
+              <input type="file" name="logo" id="invoiceLogoInput" accept="image/*">
+              <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+                <img id="invoiceLogoPreview" alt="Invoice logo preview" style="max-height:40px;max-width:150px;display:none;border-radius:4px;border:1px solid rgba(0,0,0,.12);background:#fff;">
+                <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);">
+                  <input type="checkbox" name="remove_logo" value="1" id="invoiceRemoveLogo">
+                  Remove existing logo
+                </label>
+              </div>
+            </div>
+            <div class="modal-actions" style="justify-content:flex-end;margin-top:8px;">
+              <button type="button" onclick="loadInvoiceBranding()">Reset</button>
+              <button type="submit" class="btn--primary">Save Branding</button>
+            </div>
+          </form>
+        </div>
+      </div>
     `;
     document.getElementById('financialStats').innerHTML = html;
+    // Load current branding data after rendering the form
+    loadInvoiceBranding();
   }
 
   function renderTelephony() {
@@ -678,6 +749,73 @@ function renderAi() {
     </div>
   `;
   document.getElementById('aiStats').innerHTML = html;
+}
+
+async function loadInvoiceBranding() {
+  try {
+    var res = await fetch('/api/admin/invoice-branding');
+    var data = await res.json();
+    if (!data.success) throw new Error(data.message || 'Failed to load invoice branding');
+    var d = data.data || {};
+
+    var nameEl = document.getElementById('invoiceBusinessName');
+    if (!nameEl) return; // financial section not rendered yet
+
+    nameEl.value = d.business_name || '';
+    document.getElementById('invoiceBusinessEmail').value = d.business_email || '';
+    document.getElementById('invoiceBusinessPhone').value = d.business_phone || '';
+    document.getElementById('invoiceBusinessWebsite').value = d.business_website || '';
+    document.getElementById('invoiceAddress1').value = d.address1 || '';
+    document.getElementById('invoiceAddress2').value = d.address2 || '';
+    document.getElementById('invoiceCity').value = d.city || '';
+    document.getElementById('invoiceState').value = d.state || '';
+    document.getElementById('invoicePostalCode').value = d.postal_code || '';
+    document.getElementById('invoiceCountry').value = d.country || '';
+    document.getElementById('invoiceTaxId').value = d.tax_id || '';
+    document.getElementById('invoiceRemoveLogo').checked = false;
+    var logoInput = document.getElementById('invoiceLogoInput');
+    if (logoInput) logoInput.value = '';
+
+    var preview = document.getElementById('invoiceLogoPreview');
+    if (preview) {
+      if (d.has_logo) {
+        preview.src = '/api/admin/invoice-branding/logo?ts=' + Date.now();
+        preview.style.display = 'inline-block';
+      } else {
+        preview.removeAttribute('src');
+        preview.style.display = 'none';
+      }
+    }
+  } catch (e) {
+    showAdminToast('Failed to load invoice branding: ' + e.message, 'error');
+  }
+}
+
+async function saveInvoiceBranding(ev) {
+  ev.preventDefault();
+  try {
+    var form = document.getElementById('invoiceBrandingForm');
+    if (!form) return;
+    var fd = new FormData(form);
+    var removeLogo = document.getElementById('invoiceRemoveLogo');
+    if (removeLogo && removeLogo.checked) {
+      fd.set('remove_logo', '1');
+    }
+
+    var res = await fetch('/api/admin/invoice-branding', {
+      method: 'POST',
+      body: fd
+    });
+    var data = await res.json().catch(function(){ return null; });
+    if (!res.ok || !data || data.success === false) {
+      var msg = (data && data.message) || 'Failed to save invoice branding';
+      throw new Error(msg);
+    }
+    showAdminToast(data.message || 'Invoice branding updated', 'success');
+    loadInvoiceBranding();
+  } catch (e) {
+    showAdminToast('Error saving invoice branding: ' + e.message, 'error');
+  }
 }
 
 // Load all AI numbers across users

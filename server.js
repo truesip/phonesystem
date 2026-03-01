@@ -2117,7 +2117,31 @@ async function initDb() {
 
   // Per-user AI SMS settings (outbound sender numbers)
   await pool.query(`CREATE TABLE IF NOT EXISTS user_ai_sms_settings (
-    user_id BIGINT NOT NULL,
+  )`);
+
+  // Global invoice branding settings (business info + logo for PDF invoices)
+  await pool.query(`CREATE TABLE IF NOT EXISTS invoice_branding (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    business_name VARCHAR(255) NOT NULL,
+    business_email VARCHAR(255) NULL,
+    business_phone VARCHAR(64) NULL,
+    business_website VARCHAR(255) NULL,
+    address1 VARCHAR(255) NULL,
+    address2 VARCHAR(255) NULL,
+    city VARCHAR(100) NULL,
+    state VARCHAR(100) NULL,
+    postal_code VARCHAR(32) NULL,
+    country VARCHAR(2) NULL,
+    tax_id VARCHAR(64) NULL,
+    logo_blob LONGBLOB NULL,
+    logo_mime VARCHAR(128) NULL,
+    logo_filename VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  )`);
+
+  // Per-user AI payment settings (Square/Stripe for invoicing callers)
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_ai_payment_settings (
     allowed_did_ids JSON NULL,
     default_did_id VARCHAR(64) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -3531,7 +3555,7 @@ function buildRefillDescription(invoiceNumber) {
 }
 
 // Send a refill receipt email when funds are added
-async function sendRefillReceiptEmail({ toEmail, username, amount, description, invoiceNumber, paymentMethod, processorTransactionId }) {
+async function sendRefillReceiptEmail({ toEmail, username, amount, description, invoiceNumber, paymentMethod, processorTransactionId, invoicePdfBuffer }) {
   const apiKey = process.env.SMTP2GO_API_KEY;
   const sender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'Phone.System.net')}`;
   if (!apiKey) throw new Error('SMTP2GO_API_KEY missing');
@@ -3587,6 +3611,16 @@ async function sendRefillReceiptEmail({ toEmail, username, amount, description, 
 
   const adminEmail = process.env.ADMIN_NOTIFY_EMAIL;
   const to = [toEmail].filter(Boolean);
+
+  const attachments = [];
+  if (invoicePdfBuffer && Buffer.isBuffer(invoicePdfBuffer)) {
+    const att = smtp2goAttachmentFromBuffer(invoicePdfBuffer, {
+      filename: inv ? `Invoice-${inv}.pdf` : 'Invoice.pdf',
+      mimeType: 'application/pdf'
+    });
+    if (att) attachments.push(att);
+  }
+
   const payload = {
     api_key: apiKey,
     to,
@@ -3594,9 +3628,149 @@ async function sendRefillReceiptEmail({ toEmail, username, amount, description, 
     sender,
     subject,
     text_body: text,
-    html_body: html
+    html_body: html,
+    ...(attachments.length ? { attachments } : {})
   };
   await smtp2goSendEmail(payload, { kind: 'refill-receipt', to: toEmail, subject });
+}
+
+// Helper: load global invoice branding settings (business info + logo)
+async function loadInvoiceBrandingSettings() {
+  if (!pool) return null;
+  try {
+    const [rows] = await pool.execute(
+      'SELECT * FROM invoice_branding ORDER BY id ASC LIMIT 1'
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (row) return row;
+  } catch (e) {
+    if (DEBUG) console.warn('[invoice.branding.load] error:', e?.message || e);
+  }
+
+  // Fallback defaults if admin has not configured branding yet.
+  return {
+    business_name: process.env.INVOICE_BUSINESS_NAME || 'Phone.System',
+    business_email: process.env.INVOICE_BUSINESS_EMAIL || (process.env.SMTP2GO_SENDER || ''),
+    business_phone: process.env.INVOICE_BUSINESS_PHONE || '',
+    business_website: process.env.INVOICE_BUSINESS_WEBSITE || (process.env.PUBLIC_BASE_URL || ''),
+    address1: '',
+    address2: '',
+    city: '',
+    state: '',
+    postal_code: '',
+    country: '',
+    tax_id: '',
+    logo_blob: null,
+    logo_mime: null,
+    logo_filename: null
+  };
+}
+
+async function generateInvoicePdfBufferForBillingRow(billingRow) {
+  if (!PDFDocument) return null;
+  if (!billingRow) return null;
+
+  const branding = await loadInvoiceBrandingSettings();
+
+  const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
+  const chunks = [];
+  doc.on('data', (d) => chunks.push(d));
+  const done = new Promise((resolve, reject) => {
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
+
+  // Header: logo (if present) + business info
+  let headerY = 50;
+  const headerLeftX = 50;
+  const headerRightX = 320;
+
+  try {
+    if (branding && branding.logo_blob && Buffer.isBuffer(branding.logo_blob)) {
+      try {
+        doc.image(branding.logo_blob, headerLeftX, headerY - 10, { width: 120 });
+        headerY += 0; // keep top padding
+      } catch (e) {
+        if (DEBUG) console.warn('[invoice.pdf] Failed to render logo image:', e?.message || e);
+      }
+    }
+  } catch {}
+
+  const businessName = (branding && branding.business_name) || 'Invoice';
+  const businessLines = [];
+  if (branding && branding.business_name) businessLines.push(String(branding.business_name));
+  if (branding && (branding.address1 || branding.address2)) {
+    const addrParts = [branding.address1, branding.address2].filter(Boolean).map((s) => String(s).trim());
+    if (addrParts.length) businessLines.push(addrParts.join(', '));
+  }
+  if (branding && (branding.city || branding.state || branding.postal_code || branding.country)) {
+    const cityLineParts = [branding.city, branding.state, branding.postal_code, branding.country]
+      .filter(Boolean)
+      .map((s) => String(s).trim());
+    if (cityLineParts.length) businessLines.push(cityLineParts.join(' '));
+  }
+  if (branding && branding.business_phone) businessLines.push(`Phone: ${branding.business_phone}`);
+  if (branding && branding.business_email) businessLines.push(`Email: ${branding.business_email}`);
+  if (branding && branding.business_website) businessLines.push(String(branding.business_website));
+  if (branding && branding.tax_id) businessLines.push(`Tax ID: ${branding.tax_id}`);
+
+  doc.font('Helvetica-Bold').fontSize(20).text(businessName, headerRightX, 50, { align: 'left' });
+  if (businessLines.length > 1) {
+    doc.font('Helvetica').fontSize(9).text(businessLines.slice(1).join('\n'), headerRightX, 75, {
+      align: 'left'
+    });
+  }
+
+  // Invoice label and meta
+  const invNumber = billingRow.id;
+  const createdAt = billingRow.created_at ? new Date(billingRow.created_at) : new Date();
+
+  doc.font('Helvetica-Bold').fontSize(18).text('INVOICE', headerLeftX, 120);
+  doc.moveDown();
+
+  doc.font('Helvetica').fontSize(10);
+  doc.text(`Invoice #: ${invNumber}`, headerLeftX, 150);
+  doc.text(`Date: ${createdAt.toLocaleDateString()}`, headerLeftX, 165);
+
+  // Bill To
+  const customerNameParts = [billingRow.firstname, billingRow.lastname].filter(Boolean).map((s) => String(s).trim());
+  const customerName = (customerNameParts.length ? customerNameParts.join(' ') : '') || billingRow.username || 'Customer';
+  const customerEmail = billingRow.email || '';
+
+  doc.font('Helvetica-Bold').fontSize(11).text('Bill To:', headerLeftX, 195);
+  doc.font('Helvetica').fontSize(10);
+  doc.text(customerName, headerLeftX, 210);
+  if (customerEmail) doc.text(customerEmail, headerLeftX, 225);
+
+  // Simple line item table
+  const tableTop = 260;
+  const desc = billingRow.description || buildRefillDescription(invNumber);
+  const amount = Number(billingRow.amount || 0) || 0;
+  const amountStr = `$${amount.toFixed(2)}`;
+
+  doc.font('Helvetica-Bold').fontSize(10);
+  doc.text('Description', headerLeftX, tableTop);
+  doc.text('Amount', 380, tableTop, { width: 150, align: 'right' });
+
+  doc.moveTo(headerLeftX, tableTop + 12).lineTo(550, tableTop + 12).stroke();
+
+  doc.font('Helvetica').fontSize(10);
+  doc.text(desc, headerLeftX, tableTop + 20, { width: 300 });
+  doc.text(amountStr, 380, tableTop + 20, { width: 150, align: 'right' });
+
+  // Totals
+  const totalsTop = tableTop + 70;
+  doc.moveTo(320, totalsTop).lineTo(550, totalsTop).stroke();
+  doc.font('Helvetica-Bold').fontSize(10);
+  doc.text('Total', 320, totalsTop + 10, { width: 150, align: 'left' });
+  doc.text(amountStr, 380, totalsTop + 10, { width: 150, align: 'right' });
+
+  doc.font('Helvetica').fontSize(9).fillColor('#555555');
+  doc.text('Thank you for your payment.', headerLeftX, totalsTop + 60);
+  doc.fillColor('black');
+
+  doc.end();
+  return done;
 }
 
 // Helper: send a refill receipt email for a completed billing_history row
@@ -3610,7 +3784,8 @@ async function sendRefillReceiptForBillingId(billingId) {
 
     const [rows] = await pool.execute(
       `SELECT bh.id, bh.user_id, bh.amount, bh.description, bh.payment_method, bh.reference_id, bh.status,
-              u.username, u.email
+              bh.created_at,
+              u.username, u.email, u.firstname, u.lastname
          FROM billing_history bh
          JOIN signup_users u ON u.id = bh.user_id
         WHERE bh.id = ?
@@ -3627,6 +3802,13 @@ async function sendRefillReceiptForBillingId(billingId) {
       return { ok: false, reason: 'no_email' };
     }
 
+    let invoicePdfBuffer = null;
+    try {
+      invoicePdfBuffer = await generateInvoicePdfBufferForBillingRow(row);
+    } catch (e) {
+      if (DEBUG) console.warn('[sendRefillReceiptForBillingId] Failed to generate invoice PDF:', e?.message || e);
+    }
+
     await sendRefillReceiptEmail({
       toEmail,
       username: row.username || '',
@@ -3634,7 +3816,8 @@ async function sendRefillReceiptForBillingId(billingId) {
       description: row.description || '',
       invoiceNumber: row.id,
       paymentMethod: row.payment_method || '',
-      processorTransactionId: row.reference_id || ''
+      processorTransactionId: row.reference_id || '',
+      invoicePdfBuffer
     });
 
     if (DEBUG) {
@@ -5117,6 +5300,170 @@ app.post('/api/admin/billing/:billingId/resend-receipt', requireAdmin, async (re
   } catch (e) {
     console.error('[admin.billing.resend-receipt] error:', e.message || e);
     return res.status(500).json({ success: false, message: 'Failed to resend receipt' });
+  }
+});
+
+// Admin API: Invoice branding (business info + logo used on PDF invoices)
+const invoiceBrandingUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB max logo size
+  fileFilter: (req, file, cb) => {
+    const mime = String(file.mimetype || '').toLowerCase();
+    if (mime.startsWith('image/')) return cb(null, true);
+    return cb(new Error('Logo must be an image file (PNG, JPEG, SVG, etc.)'));
+  }
+});
+
+app.get('/api/admin/invoice-branding', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const branding = await loadInvoiceBrandingSettings();
+    if (!branding) return res.json({ success: true, data: null });
+
+    return res.json({
+      success: true,
+      data: {
+        business_name: branding.business_name || '',
+        business_email: branding.business_email || '',
+        business_phone: branding.business_phone || '',
+        business_website: branding.business_website || '',
+        address1: branding.address1 || '',
+        address2: branding.address2 || '',
+        city: branding.city || '',
+        state: branding.state || '',
+        postal_code: branding.postal_code || '',
+        country: branding.country || '',
+        tax_id: branding.tax_id || '',
+        has_logo: !!(branding.logo_blob && branding.logo_mime)
+      }
+    });
+  } catch (e) {
+    if (DEBUG) console.warn('[admin.invoice-branding.get] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load invoice branding' });
+  }
+});
+
+app.post('/api/admin/invoice-branding', requireAdmin, invoiceBrandingUpload.single('logo'), async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+
+    const body = req.body || {};
+    const business_name = String(body.business_name || body.businessName || '').trim();
+    if (!business_name) {
+      return res.status(400).json({ success: false, message: 'Business name is required' });
+    }
+
+    const business_email = String(body.business_email || body.businessEmail || '').trim();
+    const business_phone = String(body.business_phone || body.businessPhone || '').trim();
+    const business_website = String(body.business_website || body.businessWebsite || '').trim();
+    const address1 = String(body.address1 || '').trim();
+    const address2 = String(body.address2 || '').trim();
+    const city = String(body.city || '').trim();
+    const state = String(body.state || '').trim();
+    const postal_code = String(body.postal_code || body.postalCode || '').trim();
+    const country = String(body.country || '').trim();
+    const tax_id = String(body.tax_id || body.taxId || '').trim();
+    const removeLogo = String(body.remove_logo || body.removeLogo || '').trim() === '1';
+
+    const file = req.file || null;
+    const logoBlob = file && file.buffer ? file.buffer : null;
+    const logoMime = file && file.mimetype ? String(file.mimetype).slice(0, 128) : null;
+    const logoFilename = file && file.originalname ? String(file.originalname).slice(0, 255) : null;
+
+    // Upsert single row in invoice_branding (id=1 or first row)
+    let existingId = null;
+    try {
+      const [rows] = await pool.execute('SELECT id FROM invoice_branding ORDER BY id ASC LIMIT 1');
+      existingId = rows && rows[0] ? rows[0].id : null;
+    } catch {}
+
+    if (existingId) {
+      const fields = [
+        'business_name = ?',
+        'business_email = ?',
+        'business_phone = ?',
+        'business_website = ?',
+        'address1 = ?',
+        'address2 = ?',
+        'city = ?',
+        'state = ?',
+        'postal_code = ?',
+        'country = ?',
+        'tax_id = ?'
+      ];
+      const params = [
+        business_name,
+        business_email || null,
+        business_phone || null,
+        business_website || null,
+        address1 || null,
+        address2 || null,
+        city || null,
+        state || null,
+        postal_code || null,
+        country || null,
+        tax_id || null
+      ];
+
+      if (logoBlob) {
+        fields.push('logo_blob = ?', 'logo_mime = ?', 'logo_filename = ?');
+        params.push(logoBlob, logoMime || null, logoFilename || null);
+      } else if (removeLogo) {
+        fields.push('logo_blob = NULL', 'logo_mime = NULL', 'logo_filename = NULL');
+      }
+
+      const sql = `UPDATE invoice_branding SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1`;
+      params.push(existingId);
+      await pool.execute(sql, params);
+    } else {
+      await pool.execute(
+        'INSERT INTO invoice_branding (business_name, business_email, business_phone, business_website, address1, address2, city, state, postal_code, country, tax_id, logo_blob, logo_mime, logo_filename) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        [
+          business_name,
+          business_email || null,
+          business_phone || null,
+          business_website || null,
+          address1 || null,
+          address2 || null,
+          city || null,
+          state || null,
+          postal_code || null,
+          country || null,
+          tax_id || null,
+          logoBlob || null,
+          logoMime || null,
+          logoFilename || null
+        ]
+      );
+    }
+
+    return res.json({ success: true, message: 'Invoice branding updated' });
+  } catch (e) {
+    if (DEBUG) console.warn('[admin.invoice-branding.post] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to save invoice branding' });
+  }
+});
+
+app.get('/api/admin/invoice-branding/logo', requireAdmin, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const [rows] = await pool.execute(
+      'SELECT logo_blob, logo_mime, logo_filename FROM invoice_branding ORDER BY id ASC LIMIT 1'
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (!row || !row.logo_blob) {
+      return res.status(404).json({ success: false, message: 'No logo configured' });
+    }
+    const mime = row.logo_mime || 'image/png';
+    const filename = row.logo_filename || 'logo';
+    const buf = row.logo_blob;
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Content-Length', buf.length);
+    return res.send(buf);
+  } catch (e) {
+    if (DEBUG) console.warn('[admin.invoice-branding.logo] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load logo' });
   }
 });
 
