@@ -1521,6 +1521,10 @@
           return 'Card';
         }
         async function submit(){
+          // If the enhanced add-funds script is active, let it handle the click
+          // to avoid duplicate checkout requests.
+          if (window.__addFundsReady) return;
+
           const amountEl = byId('fundAmount');
           const statusEl = byId('fundStatus');
           const confirmBtn = byId('confirmFundBtn');
