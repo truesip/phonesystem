@@ -16134,15 +16134,32 @@ async function handleNyvaPayCheckout(req, res) {
     const successUrl = joinUrl(baseUrl, '/dashboard?payment=success&method=card');
 
     const client = nyvaPayAxios();
+
+    // Align with NyvaPay's latest payment-links API:
+    // - "order" is your order/reference ID (echoed in webhook)
+    // - "note" is a free-form note
+    // - "reusable" + "expiry_hours" control link reuse/expiry
+    // - "metadata" carries extra identifiers through to webhooks
+    const nyvaMetadata = {
+      order_id: orderId,
+      user_id: String(userId),
+      billing_id: String(billingId),
+      source: 'phonesystem',
+    };
+
     const payload = {
       amount: Number(amountNum.toFixed(2)),
       currency: 'USD',
       product_name: (desc || `Phone.System refill #${billingId}`).substring(0, 120),
-      note: orderId,
+      order: orderId,
+      note: desc.substring(0, 200),
       customer_email: userEmail || undefined,
       customer_name: displayName || undefined,
       webhook_url: webhookUrl,
       success_redirect_url: successUrl,
+      reusable: false,
+      expiry_hours: 24,
+      metadata: nyvaMetadata,
     };
 
     if (DEBUG) console.log('[nyvapay.checkout] Creating payment link:', { orderId, amountNum });
@@ -16220,6 +16237,7 @@ async function handleNyvaPayCheckout(req, res) {
       success: false,
       message: 'Card payment provider failed to create payment link',
       provider_error: providerBody || { message: e?.message || String(e) },
+      provider_status: providerStatus ?? null,
     });
   }
 }
