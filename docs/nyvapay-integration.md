@@ -149,21 +149,38 @@ When a user chooses to pay with card via NyvaPay:
    nv-<userId>-<invoiceId>
    ```
 
-4. Call NyvaPay to create a payment link:
+4. Call NyvaPay to create a payment link using the latest payment-links API fields:
 
    ```js
    const client = nyvaPayClient();
    const publicBaseUrl = process.env.PUBLIC_BASE_URL;
 
+   const orderId = `nv-${user.id}-${invoiceId}`;
+
    const payload = {
      amount,
      currency: 'USD',
      product_name: 'Account Refill',
-     note: `Order ${orderId}`,          // helps if webhook only sends back 'note'
+
+     // NyvaPay link + customer fields
+     order: orderId,                             // echoed in webhook
+     note: `Refill for ${user.displayName || user.username}`.substring(0, 200),
      customer_email: user.email,
-     customer_name: user.displayName,   // whatever you use
+     customer_name: user.displayName,           // or any display name you use
      webhook_url: process.env.NYVAPAY_WEBHOOK_URL,
      success_redirect_url: `${publicBaseUrl}/billing/success?invoiceId=${invoiceId}`,
+
+     // Link behaviour
+     reusable: false,                           // one-time link (default)
+     expiry_hours: 24,                          // expire after 24 hours
+
+     // Extra identifiers that will be echoed back in webhook `metadata`
+     metadata: {
+       order_id: orderId,
+       user_id: String(user.id),
+       invoice_id: String(invoiceId),
+       source: 'phonesystem',
+     },
    };
 
    const { data } = await client.post('/merchant/payment-links', payload);
@@ -193,7 +210,7 @@ When a user chooses to pay with card via NyvaPay:
    - Return an error to the client.
 
 7. Insert a row into `nyvapay_payments` with:
-   - `user_id`, `order_id`, `payment_link_id`, `amount`, `currency`, basic metadata such as `product_name`, `note`, `customer_email`, `customer_name`, `status='pending'`, `credited=0`, `raw_payload`.
+   - `user_id`, `order_id`, `payment_link_id`, `amount`, `currency`, basic metadata such as `product_name`, `external_order_ref` (NyvaPay's `order` field), `note`, `customer_email`, `customer_name`, `status='pending'`, `credited=0`, `raw_payload`.
 
 8. Return `paymentUrl` to the frontend so it can redirect or open it.
 

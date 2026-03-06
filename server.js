@@ -3579,7 +3579,7 @@ function buildRefillDescription(invoiceNumber) {
 }
 
 // Send a refill receipt email when funds are added
-async function sendRefillReceiptEmail({ toEmail, username, amount, description, invoiceNumber, paymentMethod, processorTransactionId, invoicePdfBuffer }) {
+async function sendRefillReceiptEmail({ toEmail, username, amount, description, invoiceNumber, paymentMethod, processorTransactionId, processorCustomerName, processorCustomerEmail, invoicePdfBuffer }) {
   const apiKey = process.env.SMTP2GO_API_KEY;
   const sender = process.env.SMTP2GO_SENDER || `no-reply@${(process.env.SENDER_DOMAIN || 'Phone.System.net')}`;
   if (!apiKey) throw new Error('SMTP2GO_API_KEY missing');
@@ -3590,6 +3590,8 @@ async function sendRefillReceiptEmail({ toEmail, username, amount, description, 
   const inv = invoiceNumber != null ? String(invoiceNumber).trim() : '';
   const method = paymentMethod != null ? String(paymentMethod).trim() : '';
   const txn = processorTransactionId != null ? String(processorTransactionId).trim() : '';
+  const payName = processorCustomerName != null ? String(processorCustomerName).trim() : '';
+  const payEmail = processorCustomerEmail != null ? String(processorCustomerEmail).trim() : '';
 
   const subjectSuffix = inv ? ` (Invoice ${inv})` : '';
   const subject = `Payment receipt - $${amt.toFixed(2)} added to your Phone.System balance${subjectSuffix}`;
@@ -3600,6 +3602,8 @@ async function sendRefillReceiptEmail({ toEmail, username, amount, description, 
     `We have received your payment of $${amt.toFixed(2)}.`,
     inv ? `Invoice Number: ${inv}` : null,
     method ? `Payment Method: ${method}` : null,
+    payName ? `Customer name (payment): ${payName}` : null,
+    payEmail ? `Customer email (payment): ${payEmail}` : null,
     txn ? `Transaction ID: ${txn}` : null,
     description ? `Description: ${description}` : null,
     '',
@@ -3615,6 +3619,8 @@ async function sendRefillReceiptEmail({ toEmail, username, amount, description, 
     `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Amount</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">$${amt.toFixed(2)}</td></tr>`,
     inv ? `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Invoice Number</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">${inv}</td></tr>` : '',
     method ? `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Payment Method</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">${method}</td></tr>` : '',
+    payName ? `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Customer name (payment)</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">${payName}</td></tr>` : '',
+    payEmail ? `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Customer email (payment)</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">${payEmail}</td></tr>` : '',
     txn ? `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\"><b>Transaction ID</b></td><td style=\"padding:6px 10px;border-bottom:1px solid #e5e7eb;\">${txn}</td></tr>` : '',
     description ? `<tr><td style=\"padding:6px 10px;\"><b>Description</b></td><td style=\"padding:6px 10px;\">${description}</td></tr>` : ''
   ].filter(Boolean).join('');
@@ -3752,6 +3758,8 @@ async function generateInvoicePdfBufferForBillingRow(billingRow) {
   const statusLabel = statusRaw === 'completed' ? 'PAID' : (statusRaw ? statusRaw.toUpperCase() : 'PAID');
   const paymentMethod = String(billingRow.payment_method || '').trim();
   const referenceId = String(billingRow.reference_id || '').trim();
+  const paymentCustomerName = String(billingRow.card_customer_name || '').trim();
+  const paymentCustomerEmail = String(billingRow.card_customer_email || '').trim();
 
   doc.font('Helvetica-Bold').fontSize(18).text('INVOICE', headerLeftX, 120);
   doc.moveDown();
@@ -3817,6 +3825,16 @@ async function generateInvoicePdfBufferForBillingRow(billingRow) {
     doc.font('Helvetica').fontSize(9).text(paymentMethod, 420, metaY, { width: 130, align: 'right' });
     metaY += 14;
   }
+  if (paymentCustomerName) {
+    doc.font('Helvetica-Bold').fontSize(9).text('Customer name (payment):', 320, metaY, { width: 120, align: 'left' });
+    doc.font('Helvetica').fontSize(9).text(paymentCustomerName, 420, metaY, { width: 130, align: 'right' });
+    metaY += 14;
+  }
+  if (paymentCustomerEmail) {
+    doc.font('Helvetica-Bold').fontSize(9).text('Customer email (payment):', 320, metaY, { width: 120, align: 'left' });
+    doc.font('Helvetica').fontSize(9).text(paymentCustomerEmail, 420, metaY, { width: 130, align: 'right' });
+    metaY += 14;
+  }
   if (referenceId) {
     doc.font('Helvetica-Bold').fontSize(9).text('Transaction ID:', 320, metaY, { width: 120, align: 'left' });
     doc.font('Helvetica').fontSize(9).text(referenceId, 420, metaY, { width: 130, align: 'right' });
@@ -3844,9 +3862,13 @@ async function sendRefillReceiptForBillingId(billingId) {
       `SELECT bh.id, bh.user_id, bh.amount, bh.description, bh.payment_method, bh.reference_id, bh.status,
               bh.created_at,
               u.username, u.email, u.firstname, u.lastname,
-              u.address1, u.address2, u.city, u.state, u.postal_code, u.country
+              u.address1, u.address2, u.city, u.state, u.postal_code, u.country,
+              np.customer_name AS card_customer_name,
+              np.customer_email AS card_customer_email
          FROM billing_history bh
          JOIN signup_users u ON u.id = bh.user_id
+         LEFT JOIN nyvapay_payments np
+           ON np.order_id = CONCAT('nv-', bh.user_id, '-', bh.id)
         WHERE bh.id = ?
         LIMIT 1`,
       [idNum]
@@ -3868,6 +3890,9 @@ async function sendRefillReceiptForBillingId(billingId) {
       if (DEBUG) console.warn('[sendRefillReceiptForBillingId] Failed to generate invoice PDF:', e?.message || e);
     }
 
+    const processorCustomerName = String(row.card_customer_name || '').trim() || '';
+    const processorCustomerEmail = String(row.card_customer_email || '').trim() || '';
+
     await sendRefillReceiptEmail({
       toEmail,
       username: row.username || '',
@@ -3876,6 +3901,8 @@ async function sendRefillReceiptForBillingId(billingId) {
       invoiceNumber: row.id,
       paymentMethod: row.payment_method || '',
       processorTransactionId: row.reference_id || '',
+      processorCustomerName,
+      processorCustomerEmail,
       invoicePdfBuffer
     });
 
