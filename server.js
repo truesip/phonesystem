@@ -121,10 +121,19 @@ const DIALER_OUTBOUND_RATE_PER_MIN = parseFloat(
 // If 1, dialer outbound calls are billed in whole-minute increments (rounded up).
 const DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE = String(process.env.DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE ?? '0') !== '0';
 
-// External audio + call service integration
-const DIALER_AUDIO_API_BASE_URL = String(process.env.DIALER_AUDIO_API_BASE_URL || '').trim().replace(/\/$/, '');
-const DIALER_AUDIO_API_KEY = String(process.env.DIALER_AUDIO_API_KEY || '').trim();
-const VOICE_API_WEBHOOK_URL = String(process.env.VOICE_API_WEBHOOK_URL || '').trim();
+// External audio + call service integration (per integration.txt: Base + API_KEY)
+const VOICE_API_BASE_URL = String(
+  process.env.VOICE_API_BASE_URL
+  || process.env.DIALER_AUDIO_API_BASE_URL
+  || ''
+).trim().replace(/\/$/, '');
+const VOICE_API_KEY = String(
+  process.env.VOICE_API_KEY
+  || process.env.DIALER_AUDIO_API_KEY
+  || process.env.API_KEY
+  || ''
+).trim();
+const VOICE_API_WEBHOOK_URL = String(process.env.VOICE_API_WEBHOOK_URL || process.env.WEBHOOK_URL || '').trim();
 const VOICE_API_WEBHOOK_SECRET = String(process.env.VOICE_API_WEBHOOK_SECRET || '').trim();
 
 const dialerLeadUpload = multer({
@@ -163,17 +172,16 @@ function getVoiceApiCallbackUrl() {
   return joinUrl(base, '/webhooks/voice/dialer');
 }
 
-function assertDialerAudioApiConfigured() {
-  if (!DIALER_AUDIO_API_BASE_URL || !DIALER_AUDIO_API_KEY) {
-    throw new Error('Dialer audio API is not configured');
+function assertVoiceApiConfigured() {
+  if (!VOICE_API_BASE_URL || !VOICE_API_KEY) {
+    throw new Error('Voice API (base URL + API key) is not configured. Check integration.txt for required env vars.');
   }
 }
-
-async function dialerAudioApiRequest({ method = 'GET', path: apiPath = '/', data, params, headers = {}, responseType = 'json', timeout = 30000 }) {
-  assertDialerAudioApiConfigured();
-  const url = joinUrl(DIALER_AUDIO_API_BASE_URL, apiPath || '/');
+async function voiceApiRequest({ method = 'GET', path: apiPath = '/', data, params, headers = {}, responseType = 'json', timeout = 30000 }) {
+  assertVoiceApiConfigured();
+  const url = joinUrl(VOICE_API_BASE_URL, apiPath || '/');
   const mergedHeaders = {
-    'x-api-key': DIALER_AUDIO_API_KEY,
+    'x-api-key': VOICE_API_KEY,
     ...headers,
   };
   const resp = await axios({
@@ -4241,7 +4249,7 @@ app.post('/login', loginLimiter, async (req, res) => {
 
 app.get('/api/me/dialer/audio', requireAuth, async (req, res) => {
   try {
-    const data = await dialerAudioApiRequest({ method: 'GET', path: '/api/audio' });
+    const data = await voiceApiRequest({ method: 'GET', path: '/api/audio' });
     return res.json({ success: true, data });
   } catch (e) {
     if (DEBUG) console.error('[dialer.audio.list] error:', e?.message || e);
@@ -4262,7 +4270,7 @@ app.post('/api/me/dialer/audio/upload', requireAuth, dialerAudioLibraryUpload.si
       contentType: file.mimetype || 'audio/wav',
       knownLength: file.size || file.buffer.length
     });
-    const data = await dialerAudioApiRequest({
+    const data = await voiceApiRequest({
       method: 'POST',
       path: '/api/audio/upload',
       data: form,
@@ -4283,7 +4291,7 @@ app.delete('/api/me/dialer/audio/:name', requireAuth, async (req, res) => {
     if (!rawName) {
       return res.status(400).json({ success: false, message: 'Recording name is required' });
     }
-    const data = await dialerAudioApiRequest({
+    const data = await voiceApiRequest({
       method: 'DELETE',
       path: `/api/audio/${encodeURIComponent(rawName)}`
     });
@@ -10415,7 +10423,7 @@ async function startDialerLeadCall({ campaign, lead }) {
   if (callbackUrl) callPayload.webhookUrl = callbackUrl;
 
   try {
-    await dialerAudioApiRequest({
+    await voiceApiRequest({
       method: 'POST',
       path: '/call',
       data: callPayload
@@ -10712,7 +10720,6 @@ async function runDialerWorkerTick() {
           globalInProgress += 1;
         }
         await startDialerLeadCall({ campaign: c, lead });
-        }
       }
     }
   } catch (e) {
@@ -17301,8 +17308,8 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
       return res.status(202).json({ success: true, ignored: true });
     }
 
-    const campaignId = payloadCampaignId ?? Number(callRow.campaign_id) || parsedIds.campaignId;
-    const leadId = payloadLeadId ?? Number(callRow.lead_id) || parsedIds.leadId;
+    const campaignId = payloadCampaignId ?? (Number(callRow.campaign_id) || parsedIds.campaignId);
+    const leadId = payloadLeadId ?? (Number(callRow.lead_id) || parsedIds.leadId);
 
     const statusRaw = String(body.status || body.callStatus || '').trim().toLowerCase();
     const resultRaw = String(body.result || body.outcome || '').trim().toLowerCase();
