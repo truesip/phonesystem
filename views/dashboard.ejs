@@ -326,6 +326,18 @@
     .dialer-chip strong{font-weight:900;color:var(--text)}
     .dialer-actions{display:flex;flex-wrap:wrap;gap:6px}
     .dialer-actions button{font-size:11px;padding:6px 10px;border-radius:10px}
+    .dialer-content{display:flex;gap:18px;align-items:flex-start}
+    .dialer-main{flex:3;min-width:0}
+    .dialer-audio-panel{flex:1;min-width:260px;background:#ffffff;border:1px solid rgba(148,163,184,.35);border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(15,23,42,.08)}
+    .dialer-audio-panel h3{margin:0;font-size:16px}
+    .dialer-audio-list{list-style:none;margin:0;padding:0;max-height:360px;overflow:auto}
+    .dialer-audio-item{border:1px solid rgba(148,163,184,.4);border-radius:10px;padding:8px;margin-bottom:8px;display:flex;flex-direction:column;gap:4px}
+    .dialer-audio-item:last-child{margin-bottom:0}
+    .dialer-audio-item-header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .dialer-audio-item-name{font-weight:600;font-size:13px;color:#0f172a;overflow-wrap:anywhere}
+    .dialer-audio-item-uri{font-size:11px;color:#64748b;overflow-wrap:anywhere}
+    .dialer-audio-empty{font-size:12px;color:#94a3b8;padding:6px 0}
+    .dialer-audio-panel button{white-space:nowrap}
     #dialerStatus{font-size:12px;margin-left:auto}
     #callsChartContainer{margin-top:8px;margin-bottom:16px;background:#ffffff;border-radius:16px;border:1px solid rgba(0,0,0,.12);padding:12px}
     #callsChart{width:100%;max-height:220px}
@@ -669,6 +681,8 @@
     @media (max-width: 1024px) {
       /* Disable zoom scaling on tablets/mobile */
       #appRoot{zoom:100% !important;transform:none !important;width:100% !important;}
+      .dialer-content{flex-direction:column}
+      .dialer-audio-panel{width:100%}
     }
 
     @media (max-width: 768px) {
@@ -1060,33 +1074,48 @@
       <section id="view-dialer" style="display:none">
         <h2>Auto Dialer</h2>
         <div class="muted" style="margin-bottom:10px">
-          Launch AI-powered outbound campaigns: pick an AI agent, upload leads from CSV,
-          then start, pause, or complete the run while tracking answer/voicemail/transfer metrics.
+          Upload leads from CSV, choose a Caller ID plus audio recording, then start, pause, or complete campaigns while tracking performance.
         </div>
         <div class="toolbar" id="dialer-toolbar">
           <button id="dialerCreateBtn" class="btn--primary">➕ Create Campaign</button>
           <button id="dialerRefreshBtn">Refresh</button>
           <div id="dialerStatus" class="muted"></div>
         </div>
-        <table id="dialer-campaigns-table" style="display:none">
-          <thead>
-            <tr>
-              <th>Campaign</th>
-              <th>AI Agent</th>
-              <th>Leads</th>
-              <th>Concurrency</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-        <div class="toolbar" id="dialer-pager" style="display:none">
-          <button id="dialerPrev">Prev</button>
-          <span id="dialerPageInfo" class="muted"></span>
-          <button id="dialerNext">Next</button>
+        <div class="dialer-content">
+          <div class="dialer-main">
+            <table id="dialer-campaigns-table" style="display:none">
+              <thead>
+                <tr>
+                  <th>Campaign</th>
+                  <th>Caller ID</th>
+                  <th>Audio</th>
+                  <th>Leads</th>
+                  <th>Concurrency</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div class="toolbar" id="dialer-pager" style="display:none">
+              <button id="dialerPrev">Prev</button>
+              <span id="dialerPageInfo" class="muted"></span>
+              <button id="dialerNext">Next</button>
+            </div>
+            <div id="dialer-empty" class="muted">Loading…</div>
+          </div>
+          <aside class="dialer-audio-panel">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+              <h3 style="margin:0">Audio Library</h3>
+              <button id="dialerAudioRefreshBtn" class="btn--muted" type="button">Refresh</button>
+            </div>
+            <div class="muted" style="font-size:12px;margin-bottom:10px;">Upload WAV files (max 10&nbsp;MB) and reuse them across campaigns.</div>
+            <button id="dialerAudioUploadBtn" class="btn--primary" type="button" style="width:100%;margin-bottom:10px;">➕ Upload Audio</button>
+            <input id="dialerAudioUploadInput" type="file" accept=".wav,audio/wav" style="display:none">
+            <div id="dialerAudioStatus" class="muted" style="font-size:12px;margin-bottom:8px;"></div>
+            <ul id="dialerAudioList" class="dialer-audio-list"></ul>
+          </aside>
         </div>
-        <div id="dialer-empty" class="muted">Loading…</div>
       </section>
 
       <section id="view-ai" style="display:none">
@@ -1719,14 +1748,14 @@
             <input id="dialerCampaignNameInput" type="text" placeholder="e.g. January Renewals" required>
           </label>
           <label style="display:flex;flex-direction:column;gap:4px">
-            <span>AI Agent *</span>
-            <select id="dialerAgentSelect"><option value="">Loading agents…</option></select>
-            <div class="muted" style="font-size:11px;margin-top:2px">Required for Pipecat service endpoint. If campaign audio is provided, the agent's AI won't be used.</div>
+            <span>Caller ID *</span>
+            <input id="dialerCallerIdInput" type="text" placeholder="+15551234567 or sip:user@example.com">
+            <div class="muted" style="font-size:11px;margin-top:2px">Use an outbound DID in E.164 format or a SIP URI your trunk accepts.</div>
           </label>
           <label style="display:flex;flex-direction:column;gap:4px">
-            <span>Campaign Audio (Optional)</span>
-            <input id="dialerCampaignAudioInput" type="file" accept=".wav,audio/wav" style="font-size:12px">
-            <div class="muted" style="font-size:11px;margin-top:2px">Upload a WAV file (max 10MB) to play instead of using the AI agent.</div>
+            <span>Audio Recording *</span>
+            <select id="dialerAudioSelect" style="font-size:12px"><option value="">Loading audio…</option></select>
+            <div class="muted" style="font-size:11px;margin-top:2px">Manage recordings from the Audio Library in the Auto Dialer panel.</div>
           </label>
           <label style="display:flex;flex-direction:column;gap:4px">
             <span>Concurrent Calls</span>
@@ -2397,6 +2426,8 @@
     const dialerPageSize = 25;
     let dialerTotal = 0;
     let dialerUploadCampaignId = null;
+    let dialerAudioLibrary = [];
+    let dialerAudioLoading = false;
 
     function setDialerStatus(msg, isError){
       const el = $('#dialerStatus');
@@ -2475,7 +2506,9 @@
         const stats = c.stats || {};
         const updatedAt = c.updated_at ? new Date(c.updated_at).toLocaleString() : '—';
         const hasAudio = c.has_campaign_audio || false;
-        const aiName = c.ai_agent_name ? escapeHtml(c.ai_agent_name) : (c.ai_agent_id ? `Agent ${c.ai_agent_id}` : (hasAudio ? '🔊 Audio Only' : '—'));
+        const callerLabel = c.caller_id ? escapeHtml(c.caller_id) : '—';
+        const audioRaw = c.audio_recording_name || c.audio_playback_uri || (hasAudio ? 'Campaign Audio' : '');
+        const audioLabel = audioRaw ? escapeHtml(audioRaw) : '—';
         const leadsSummary = `${dialerNumber(stats.completed)} / ${dialerNumber(stats.totalLeads)} completed`;
         const actions = [];
         actions.push(`<button class="btn--muted" data-dialer-action="upload" data-id="${escapeHtml(String(c.id))}">Upload CSV</button>`);
@@ -2499,12 +2532,188 @@
             <div class="dialer-chip-grid">${dialerStatsChips(stats, c.id)}</div>
             <div class="dialer-chip-hint">Click on counts to view lead details</div>
           </td>
-          <td>${escapeHtml(aiName)}</td>
+          <td>${callerLabel}</td>
+          <td>${audioLabel}</td>
           <td>${escapeHtml(leadsSummary)}</td>
           <td>${dialerNumber(c.concurrency_limit || c.concurrency || 1)}</td>
           <td>${dialerStatusBadge(c.status)}</td>
           <td><div class="dialer-actions">${actions.join(' ')}</div></td>`;
         tbody.appendChild(tr);
+      }
+    }
+    function populateDialerAudioSelect(){
+      const sel = $('#dialerAudioSelect');
+      if (!sel) return;
+      const previous = sel.value;
+      sel.innerHTML = '';
+      const placeholder = new Option(dialerAudioLibrary.length ? 'Select audio…' : 'No audio recordings found', '');
+      placeholder.value = '';
+      if (!dialerAudioLibrary.length) {
+        placeholder.disabled = true;
+        sel.disabled = true;
+      } else {
+        sel.disabled = false;
+      }
+      sel.appendChild(placeholder);
+      if (!dialerAudioLibrary.length) {
+        sel.value = '';
+        return;
+      }
+      for (const item of dialerAudioLibrary){
+        const label = item.name || item.playbackUri || 'Recording';
+        const value = item.playbackUri || label;
+        const opt = new Option(label, value);
+        opt.dataset.name = item.name || '';
+        sel.appendChild(opt);
+      }
+      const still = Array.from(sel.options || []).some(opt => opt.value === previous && opt.value !== '');
+      if (still) sel.value = previous;
+    }
+
+    function renderDialerAudioLibrary(){
+      const list = $('#dialerAudioList');
+      const statusEl = $('#dialerAudioStatus');
+      if (!list) return;
+      list.innerHTML = '';
+      if (dialerAudioLoading){
+        const li = document.createElement('li');
+        li.className = 'dialer-audio-empty';
+        li.textContent = 'Loading audio library…';
+        list.appendChild(li);
+        if (statusEl) { statusEl.textContent = 'Loading audio library…'; statusEl.style.color = '#64748b'; }
+        return;
+      }
+      if (!Array.isArray(dialerAudioLibrary) || !dialerAudioLibrary.length){
+        const li = document.createElement('li');
+        li.className = 'dialer-audio-empty';
+        li.textContent = 'No recordings uploaded yet.';
+        list.appendChild(li);
+        if (statusEl) { statusEl.textContent = 'Upload a WAV file to get started.'; statusEl.style.color = '#64748b'; }
+        return;
+      }
+      if (statusEl) statusEl.textContent = '';
+      for (const item of dialerAudioLibrary){
+        const li = document.createElement('li');
+        li.className = 'dialer-audio-item';
+        const header = document.createElement('div');
+        header.className = 'dialer-audio-item-header';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'dialer-audio-item-name';
+        nameEl.textContent = item.name || item.playbackUri || 'Recording';
+        const actions = document.createElement('div');
+        actions.className = 'dialer-audio-actions';
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn--danger';
+        delBtn.textContent = 'Delete';
+        delBtn.setAttribute('data-audio-delete', item.recordingName || item.name || item.playbackUri || '');
+        actions.appendChild(delBtn);
+        header.appendChild(nameEl);
+        header.appendChild(actions);
+        const uriEl = document.createElement('div');
+        uriEl.className = 'dialer-audio-item-uri';
+        uriEl.textContent = item.playbackUri || '';
+        li.appendChild(header);
+        li.appendChild(uriEl);
+        list.appendChild(li);
+      }
+    }
+
+    function normalizeDialerAudioItems(payload){
+      if (!payload) return [];
+      if (Array.isArray(payload)) return payload;
+      if (Array.isArray(payload.data)) return payload.data;
+      if (Array.isArray(payload.recordings)) return payload.recordings;
+      return [];
+    }
+
+    function mapDialerAudioItem(raw){
+      if (!raw) return null;
+      const playbackUri = raw.playbackUri || raw.playback_uri || raw.uri || raw.playbackURL || '';
+      const name = raw.recordingName || raw.recording_name || raw.name || raw.filename || playbackUri || '';
+      const recordingName = raw.recordingName || raw.recording_name || raw.name || name || playbackUri;
+      return {
+        name,
+        recordingName,
+        playbackUri,
+        sizeBytes: raw.size || raw.sizeBytes || raw.size_bytes || raw.bytes || null,
+        uploadedAt: raw.uploaded_at || raw.created_at || raw.timestamp || null
+      };
+    }
+
+    async function loadDialerAudioLibrary(){
+      const statusEl = $('#dialerAudioStatus');
+      dialerAudioLoading = true;
+      if (statusEl) { statusEl.textContent = 'Loading audio library…'; statusEl.style.color = '#64748b'; }
+      renderDialerAudioLibrary();
+      try {
+        const r = await fetch('/api/me/dialer/audio');
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to load audio library');
+        }
+        const items = normalizeDialerAudioItems(j.data ?? j.recordings ?? []);
+        dialerAudioLibrary = items.map(mapDialerAudioItem).filter(Boolean);
+        if (statusEl) {
+          statusEl.textContent = dialerAudioLibrary.length ? '' : 'Upload a WAV file to get started.';
+          statusEl.style.color = '#64748b';
+        }
+      } catch (err) {
+        dialerAudioLibrary = [];
+        if (statusEl) {
+          statusEl.textContent = err?.message || 'Failed to load audio library.';
+          statusEl.style.color = '#dc2626';
+        }
+        console.error('[dialer.audio]', err);
+      } finally {
+        dialerAudioLoading = false;
+        renderDialerAudioLibrary();
+        populateDialerAudioSelect();
+      }
+    }
+
+    async function handleDialerAudioUpload(file){
+      if (!file) return;
+      const statusEl = $('#dialerAudioStatus');
+      if (statusEl) { statusEl.textContent = `Uploading ${file.name}…`; statusEl.style.color = '#64748b'; }
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await fetch('/api/me/dialer/audio/upload', {
+          method: 'POST',
+          body: fd
+        });
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to upload audio');
+        }
+        showToast('Audio uploaded.');
+        await loadDialerAudioLibrary();
+      } catch (err) {
+        if (statusEl) { statusEl.textContent = err?.message || 'Failed to upload audio.'; statusEl.style.color = '#dc2626'; }
+        showToast(err?.message || 'Failed to upload audio.', 'error');
+      } finally {
+        const input = $('#dialerAudioUploadInput');
+        if (input) input.value = '';
+      }
+    }
+
+    async function deleteDialerAudioRecording(recordingName){
+      if (!recordingName) return;
+      if (!confirm(`Delete audio "${recordingName}"?`)) return;
+      const statusEl = $('#dialerAudioStatus');
+      if (statusEl) { statusEl.textContent = 'Deleting audio…'; statusEl.style.color = '#64748b'; }
+      try {
+        const r = await fetch(`/api/me/dialer/audio/${encodeURIComponent(recordingName)}`, { method: 'DELETE' });
+        const j = await r.json();
+        if (!r.ok || !j || j.success === false){
+          throw new Error(j?.message || 'Failed to delete audio');
+        }
+        showToast('Audio deleted.');
+        await loadDialerAudioLibrary();
+      } catch (err) {
+        if (statusEl) { statusEl.textContent = err?.message || 'Failed to delete audio.'; statusEl.style.color = '#dc2626'; }
+        showToast(err?.message || 'Failed to delete audio.', 'error');
       }
     }
 
@@ -2535,55 +2744,22 @@
       }
     }
 
-    async function ensureDialerAgentOptions(){
-      if (!Array.isArray(aiAgentsData) || !aiAgentsData.length){
-        try { await loadAiAgents(); } catch (e) { console.warn('[dialer] loadAiAgents failed', e); }
-      }
-    }
-
-
-    function populateDialerAgentSelect(){
-      const sel = $('#dialerAgentSelect');
-      if (!sel) return;
-      const prev = sel.value;
-      sel.innerHTML = '';
-      
-      if (!Array.isArray(aiAgentsData) || !aiAgentsData.length){
-        const opt = new Option('Create an AI agent first', '');
-        opt.disabled = true;
-        sel.appendChild(opt);
-        sel.disabled = true;
-        return;
-      }
-      
-      sel.disabled = false;
-      sel.appendChild(new Option('Select AI agent…', ''));
-      
-      for (const a of aiAgentsData){
-        const id = a && a.id != null ? String(a.id) : '';
-        if (!id) continue;
-        sel.appendChild(new Option(a.display_name || `Agent ${id}`, id));
-      }
-      const still = Array.from(sel.options || []).some(o => o.value === prev);
-      sel.value = still ? prev : '';
-    }
-
 
     async function openDialerCreateModal(){
       const modal = $('#dialerCreateModal');
       if (!modal) return;
       $('#dialerCampaignNameInput').value = '';
-      $('#dialerCampaignAudioInput').value = '';
+      $('#dialerCallerIdInput').value = '';
+      const audioSelect = $('#dialerAudioSelect');
+      if (audioSelect) audioSelect.value = '';
+      populateDialerAudioSelect();
+      if (!dialerAudioLibrary.length && !dialerAudioLoading) {
+        loadDialerAudioLibrary().catch(() => {});
+      }
       $('#dialerConcurrencyInput').value = '1';
       $('#dialerConcurrencyValue').textContent = '1';
       const errorEl = $('#dialerCreateError');
       if (errorEl) { errorEl.style.display = 'none'; errorEl.textContent = ''; }
-      try {
-        await ensureDialerAgentOptions();
-        populateDialerAgentSelect();
-      } catch (e) {
-        setDialerStatus(e?.message || 'Load AI agents first', true);
-      }
       modal.style.display = 'flex';
       setTimeout(() => { try { $('#dialerCampaignNameInput').focus(); } catch {} }, 0);
     }
@@ -2595,9 +2771,12 @@
 
     async function submitDialerCreateForm(){
       const name = ($('#dialerCampaignNameInput').value || '').trim();
-      const agentId = ($('#dialerAgentSelect').value || '').trim();
+      const callerId = ($('#dialerCallerIdInput').value || '').trim();
+      const audioSelect = $('#dialerAudioSelect');
+      const selectedOption = audioSelect && audioSelect.selectedOptions ? audioSelect.selectedOptions[0] : null;
+      const audioUri = audioSelect ? (audioSelect.value || '').trim() : '';
+      const audioName = selectedOption ? (selectedOption.dataset.name || selectedOption.textContent || '') : '';
       const concurrency = parseInt($('#dialerConcurrencyInput').value || '1', 10) || 1;
-      const audioFile = $('#dialerCampaignAudioInput').files ? $('#dialerCampaignAudioInput').files[0] : null;
       const errorEl = $('#dialerCreateError');
       
       if (!name){
@@ -2608,9 +2787,17 @@
         return;
       }
       
-      if (!agentId){
+      if (!callerId){
         if (errorEl){
-          errorEl.textContent = 'AI agent is required (even for audio-only campaigns).';
+          errorEl.textContent = 'Caller ID is required.';
+          errorEl.style.display = 'block';
+        }
+        return;
+      }
+
+      if (!audioUri){
+        if (errorEl){
+          errorEl.textContent = 'Select an audio recording for this campaign.';
           errorEl.style.display = 'block';
         }
         return;
@@ -2626,7 +2813,9 @@
       try {
         const payload = {
           name,
-          ai_agent_id: agentId,
+          caller_id: callerId,
+          audio_playback_uri: audioUri,
+          audio_recording_name: audioName || null,
           concurrency_limit: concurrency
         };
         
@@ -2639,32 +2828,8 @@
         if (!r.ok || !j || j.success === false){
           throw new Error(j?.message || 'Failed to create campaign');
         }
-        
         const newId = j && j.data && j.data.id != null ? String(j.data.id) : '';
-        
-        // Upload audio if provided
-        if (audioFile && newId) {
-          if (btn) btn.textContent = 'Uploading audio...';
-          try {
-            const fd = new FormData();
-            fd.append('audio', audioFile);
-            const audioR = await fetch(`/api/me/dialer/campaigns/${encodeURIComponent(newId)}/audio`, {
-              method: 'POST',
-              body: fd
-            });
-            const audioJ = await audioR.json();
-            if (!audioR.ok || !audioJ || audioJ.success === false){
-              throw new Error(audioJ?.message || 'Failed to upload audio');
-            }
-            showToast('Campaign created with audio.');
-          } catch (audioErr) {
-            console.error('[dialer.audio]', audioErr);
-            showToast(`Campaign created but audio upload failed: ${audioErr?.message || 'Unknown error'}`, 'error');
-          }
-        } else {
-          showToast('Campaign created.');
-        }
-        
+        showToast('Campaign created.');
         closeDialerCreateModal();
         await loadDialerCampaigns();
         if (newId){
@@ -2998,12 +3163,49 @@
           loadDialerCampaigns();
         }
       });
+
+      const audioRefreshBtn = $('#dialerAudioRefreshBtn');
+      if (audioRefreshBtn && !audioRefreshBtn.dataset.bound){
+        audioRefreshBtn.dataset.bound = '1';
+        audioRefreshBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          loadDialerAudioLibrary();
+        });
+      }
+      const audioUploadBtn = $('#dialerAudioUploadBtn');
+      if (audioUploadBtn && !audioUploadBtn.dataset.bound){
+        audioUploadBtn.dataset.bound = '1';
+        audioUploadBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const input = $('#dialerAudioUploadInput');
+          if (input) input.click();
+        });
+      }
+      const audioUploadInput = $('#dialerAudioUploadInput');
+      if (audioUploadInput && !audioUploadInput.dataset.bound){
+        audioUploadInput.dataset.bound = '1';
+        audioUploadInput.addEventListener('change', (e) => {
+          const file = e && e.target && e.target.files ? e.target.files[0] : null;
+          if (file) handleDialerAudioUpload(file);
+        });
+      }
+      const audioList = $('#dialerAudioList');
+      if (audioList && !audioList.dataset.bound){
+        audioList.dataset.bound = '1';
+        audioList.addEventListener('click', (e) => {
+          const btn = e.target.closest ? e.target.closest('[data-audio-delete]') : null;
+          if (!btn) return;
+          e.preventDefault();
+          const name = btn.getAttribute('data-audio-delete');
+          if (name) deleteDialerAudioRecording(name);
+        });
+      }
     }
 
     function openDialerTab(){
       initDialerUi();
       loadDialerCampaigns();
-      ensureDialerAgentOptions().then(populateDialerAgentSelect).catch(() => {});
+      loadDialerAudioLibrary().catch(() => {});
     }
     function grabRows(payload){
       const d = (payload && typeof payload === 'object') ? (payload.data ?? payload) : payload;

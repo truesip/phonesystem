@@ -22,6 +22,7 @@ const zlib = require('zlib');
 const mysql = require('mysql2/promise');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
+const FormData = require('form-data');
 const Papa = require('papaparse');
 const PizZip = require('pizzip');
 const Docxtemplater = require('docxtemplater');
@@ -81,7 +82,6 @@ const AI_CALLER_MEMORY_MAX_CHARS_PER_MESSAGE = Math.max(
 const AI_CALLER_MEMORY_MAX_DAYS = Math.max(1, parseInt(process.env.AI_CALLER_MEMORY_MAX_DAYS || '30', 10) || 30);
 // Outbound dialer settings
 const DIALER_MIN_CONCURRENCY = 1;
-// Keep this aligned with Pipecat per-service capacity to avoid PCC-AGENT-AT-CAPACITY.
 // Default to 20, but allow overriding via env.
 const DIALER_MAX_CONCURRENCY = Math.max(
   DIALER_MIN_CONCURRENCY,
@@ -91,15 +91,6 @@ const DIALER_MAX_LEADS_PER_UPLOAD = Math.max(1, parseInt(process.env.DIALER_MAX_
 const DIALER_CAMPAIGN_STATUSES = ['draft', 'running', 'paused', 'completed', 'deleted'];
 const DIALER_LEAD_STATUSES = ['pending', 'queued', 'dialing', 'answered', 'voicemail', 'transferred', 'failed', 'completed'];
 const DIALER_WORKER_INTERVAL_SECONDS = Math.max(0, parseInt(process.env.DIALER_WORKER_INTERVAL_SECONDS || '0', 10) || 0);
-const DIALER_DAILY_ROOM_TTL_SECONDS = Math.max(0, parseInt(process.env.DIALER_DAILY_ROOM_TTL_SECONDS || '1800', 10) || 1800);
-const DIALER_CAPACITY_BACKOFF_MS = Math.max(1000, parseInt(process.env.DIALER_CAPACITY_BACKOFF_MS || '15000', 10) || 15000);
-const DIALER_MAX_CONCURRENCY_PER_AGENT = Math.max(
-  1,
-  Math.min(
-    DIALER_MAX_CONCURRENCY,
-    parseInt(process.env.DIALER_MAX_CONCURRENCY_PER_AGENT || String(DIALER_MAX_CONCURRENCY), 10) || DIALER_MAX_CONCURRENCY
-  )
-);
 
 // Event-driven refill: when a dialout call ends, schedule the next lead to keep the batch full.
 const DIALER_REFILL_ON_DIALOUT_EVENTS = String(process.env.DIALER_REFILL_ON_DIALOUT_EVENTS ?? '1') !== '0';
@@ -111,14 +102,7 @@ const DIALER_WORKER_DB_LOCK = String(process.env.DIALER_WORKER_DB_LOCK ?? '1') !
 const DIALER_WORKER_DB_LOCK_NAME = String(process.env.DIALER_WORKER_DB_LOCK_NAME || 'dialer_worker').trim() || 'dialer_worker';
 const DIALER_WORKER_DB_LOCK_WAIT_SECONDS = Math.max(0, parseInt(process.env.DIALER_WORKER_DB_LOCK_WAIT_SECONDS || '0', 10) || 0);
 
-// Optional: gate outbound dialer starts based on Pipecat service activeSessionCount.
-// This prevents 429 PCC-AGENT-AT-CAPACITY storms when the service is full (including inbound + zombie sessions).
-const DIALER_PIPECAT_ACTIVE_SESSION_GATING = String(process.env.DIALER_PIPECAT_ACTIVE_SESSION_GATING ?? '1') !== '0';
-const PIPECAT_SERVICE_STATUS_CACHE_MS = Math.max(250, parseInt(process.env.PIPECAT_SERVICE_STATUS_CACHE_MS || '2000', 10) || 2000);
-// Reserve some capacity for inbound calls if needed (0 = use full service capacity).
-const DIALER_PIPECAT_CAPACITY_HEADROOM = Math.max(0, parseInt(process.env.DIALER_PIPECAT_CAPACITY_HEADROOM || '0', 10) || 0);
-
-// Optional global cap across all campaigns to avoid hitting Pipecat/Daily dial-out limits.
+// Optional global cap across all campaigns to avoid hitting provider dial-out limits.
 // 0 disables the global cap (per-campaign concurrency only).
 const DIALER_GLOBAL_MAX_DIALOUT = Math.max(0, parseInt(process.env.DIALER_GLOBAL_MAX_DIALOUT || '0', 10) || 0);
 // Minimum credit required to run Auto Dialer campaigns. Defaults to 0 (pause when balance goes negative).
@@ -137,7 +121,18 @@ const DIALER_OUTBOUND_RATE_PER_MIN = parseFloat(
 // If 1, dialer outbound calls are billed in whole-minute increments (rounded up).
 const DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE = String(process.env.DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE ?? '0') !== '0';
 
+// External audio + call service integration
+const DIALER_AUDIO_API_BASE_URL = String(process.env.DIALER_AUDIO_API_BASE_URL || '').trim().replace(/\/$/, '');
+const DIALER_AUDIO_API_KEY = String(process.env.DIALER_AUDIO_API_KEY || '').trim();
+const VOICE_API_WEBHOOK_URL = String(process.env.VOICE_API_WEBHOOK_URL || '').trim();
+const VOICE_API_WEBHOOK_SECRET = String(process.env.VOICE_API_WEBHOOK_SECRET || '').trim();
+
 const dialerLeadUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+});
+
+const dialerAudioLibraryUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB
 });
@@ -160,6 +155,39 @@ function joinUrl(base, p) {
   if (b.endsWith('/')) b = b.slice(0, -1);
   if (s && !s.startsWith('/')) s = '/' + s;
   return b + s;
+}
+function getVoiceApiCallbackUrl() {
+  if (VOICE_API_WEBHOOK_URL) return VOICE_API_WEBHOOK_URL;
+  const base = String(process.env.PUBLIC_BASE_URL || process.env.PORTAL_BASE_URL || '').trim();
+  if (!base) return '';
+  return joinUrl(base, '/webhooks/voice/dialer');
+}
+
+function assertDialerAudioApiConfigured() {
+  if (!DIALER_AUDIO_API_BASE_URL || !DIALER_AUDIO_API_KEY) {
+    throw new Error('Dialer audio API is not configured');
+  }
+}
+
+async function dialerAudioApiRequest({ method = 'GET', path: apiPath = '/', data, params, headers = {}, responseType = 'json', timeout = 30000 }) {
+  assertDialerAudioApiConfigured();
+  const url = joinUrl(DIALER_AUDIO_API_BASE_URL, apiPath || '/');
+  const mergedHeaders = {
+    'x-api-key': DIALER_AUDIO_API_KEY,
+    ...headers,
+  };
+  const resp = await axios({
+    method,
+    url,
+    data,
+    params,
+    headers: mergedHeaders,
+    responseType,
+    timeout,
+    maxContentLength: 20 * 1024 * 1024,
+    maxBodyLength: 20 * 1024 * 1024,
+  });
+  return resp.data;
 }
 
 function digitsOnly(s) {
@@ -2257,8 +2285,11 @@ async function initDb() {
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
     name VARCHAR(191) NOT NULL,
-    ai_agent_id BIGINT NOT NULL,
+    ai_agent_id BIGINT NULL,
     ai_agent_name VARCHAR(191) NULL,
+    caller_id VARCHAR(32) NULL,
+    audio_recording_name VARCHAR(191) NULL,
+    audio_playback_uri VARCHAR(255) NULL,
     status ENUM('draft','running','paused','completed','deleted') NOT NULL DEFAULT 'draft',
     concurrency_limit INT NOT NULL DEFAULT 1,
     last_started_at DATETIME NULL,
@@ -2275,6 +2306,9 @@ async function initDb() {
   // Uses direct ALTER TABLE with duplicate-column error suppression for reliability.
   for (const col of [
     { name: 'ai_agent_name', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN ai_agent_name VARCHAR(191) NULL" },
+    { name: 'caller_id', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN caller_id VARCHAR(32) NULL" },
+    { name: 'audio_recording_name', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN audio_recording_name VARCHAR(191) NULL" },
+    { name: 'audio_playback_uri', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN audio_playback_uri VARCHAR(255) NULL" },
     { name: 'concurrency_limit', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN concurrency_limit INT NOT NULL DEFAULT 1" },
     { name: 'last_started_at', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN last_started_at DATETIME NULL" },
     { name: 'last_paused_at', ddl: "ALTER TABLE dialer_campaigns ADD COLUMN last_paused_at DATETIME NULL" },
@@ -4202,6 +4236,63 @@ app.post('/login', loginLimiter, async (req, res) => {
   } catch (e) {
     if (DEBUG) console.warn('login error', e.message || e);
     return res.status(500).render('login', { error: 'Login failed' });
+  }
+});
+
+app.get('/api/me/dialer/audio', requireAuth, async (req, res) => {
+  try {
+    const data = await dialerAudioApiRequest({ method: 'GET', path: '/api/audio' });
+    return res.json({ success: true, data });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.audio.list] error:', e?.message || e);
+    const message = e?.response?.data?.message || e?.message || 'Failed to load audio files';
+    return res.status(502).json({ success: false, message });
+  }
+});
+
+app.post('/api/me/dialer/audio/upload', requireAuth, dialerAudioLibraryUpload.single('file'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file || !file.buffer) {
+      return res.status(400).json({ success: false, message: 'Missing audio file (field name: file)' });
+    }
+    const form = new FormData();
+    form.append('file', file.buffer, {
+      filename: file.originalname || 'audio.wav',
+      contentType: file.mimetype || 'audio/wav',
+      knownLength: file.size || file.buffer.length
+    });
+    const data = await dialerAudioApiRequest({
+      method: 'POST',
+      path: '/api/audio/upload',
+      data: form,
+      headers: form.getHeaders()
+    });
+    return res.json({ success: true, data });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.audio.upload] error:', e?.message || e);
+    const status = e?.response?.status || 502;
+    const message = e?.response?.data?.message || e?.message || 'Failed to upload audio';
+    return res.status(status === 200 ? 502 : status).json({ success: false, message });
+  }
+});
+
+app.delete('/api/me/dialer/audio/:name', requireAuth, async (req, res) => {
+  try {
+    const rawName = String(req.params.name || '').trim();
+    if (!rawName) {
+      return res.status(400).json({ success: false, message: 'Recording name is required' });
+    }
+    const data = await dialerAudioApiRequest({
+      method: 'DELETE',
+      path: `/api/audio/${encodeURIComponent(rawName)}`
+    });
+    return res.json({ success: true, data });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.audio.delete] error:', e?.message || e);
+    const status = e?.response?.status || 502;
+    const message = e?.response?.data?.message || e?.message || 'Failed to delete audio';
+    return res.status(status === 200 ? 502 : status).json({ success: false, message });
   }
 });
 app.post('/logout', (req, res) => { try { req.session.destroy(()=>{}); } catch {} res.redirect('/login'); });
@@ -9558,6 +9649,15 @@ function normalizeDialerPhone(raw) {
   return `+${normalized}`;
 }
 
+function normalizeDialerCallerId(raw) {
+  const val = String(raw || '').trim();
+  if (!val) return '';
+  if (val.toLowerCase().startsWith('sip:') || val.includes('@')) {
+    return val.replace(/\s+/g, '');
+  }
+  return normalizeDialerPhone(val);
+}
+
 async function ensureAiAgentForUser({ userId, agentId }) {
   if (!pool) throw new Error('Database not configured');
   if (!agentId) throw new Error('AI agent id is required');
@@ -9677,6 +9777,9 @@ function serializeDialerCampaign(row) {
     status: row.status,
     ai_agent_id: row.ai_agent_id ? Number(row.ai_agent_id) : null,
     ai_agent_name: row.ai_agent_name || '',
+    caller_id: row.caller_id || '',
+    audio_recording_name: row.audio_recording_name || '',
+    audio_playback_uri: row.audio_playback_uri || '',
     concurrency_limit: Number(row.concurrency_limit || 1),
     has_campaign_audio: hasCampaignAudio,
     campaign_audio_filename: hasCampaignAudio ? (row.campaign_audio_filename || null) : null,
@@ -9726,23 +9829,23 @@ app.post('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
     const name = String(req.body?.name || '').trim().slice(0, 191);
-    const aiAgentId = Number(req.body?.ai_agent_id || req.body?.aiAgentId || 0) || null;
+    const callerIdRaw = String(req.body?.caller_id || req.body?.callerId || '').trim();
+    const audioRecordingName = String(req.body?.audio_recording_name || req.body?.audioRecordingName || '').trim().slice(0, 191);
+    const audioPlaybackUri = String(req.body?.audio_playback_uri || req.body?.audioPlaybackUri || '').trim().slice(0, 255);
     const concurrencyRaw = parseInt(req.body?.concurrency_limit ?? req.body?.concurrencyLimit ?? 1, 10);
     
     if (!name) return res.status(400).json({ success: false, message: 'Campaign name is required' });
-    // AI agent is optional now - if not provided, campaign must use audio-only mode
+    const callerId = normalizeDialerCallerId(callerIdRaw);
+    if (!callerId) return res.status(400).json({ success: false, message: 'Caller ID is invalid. Use E.164 like +15551234567 or a SIP URI.' });
+    if (!audioPlaybackUri) return res.status(400).json({ success: false, message: 'Select an audio recording for this campaign' });
 
     const concurrency = clampDialerConcurrencyLimit(concurrencyRaw);
 
-    let agent = null;
-    if (aiAgentId) {
-      agent = await ensureAiAgentForUser({ userId, agentId: aiAgentId });
-    }
     const [result] = await pool.execute(
       `INSERT INTO dialer_campaigns
-        (user_id, name, ai_agent_id, ai_agent_name, concurrency_limit)
-       VALUES (?, ?, ?, ?, ?)`,
-      [userId, name, agent?.id || null, agent?.name || null, concurrency]
+        (user_id, name, ai_agent_id, ai_agent_name, caller_id, audio_recording_name, audio_playback_uri, concurrency_limit)
+       VALUES (?, ?, NULL, NULL, ?, ?, ?, ?)`,
+      [userId, name, callerId, audioRecordingName || null, audioPlaybackUri, concurrency]
     );
 
     const campaignId = result && result.insertId ? Number(result.insertId) : null;
@@ -9862,6 +9965,12 @@ app.patch('/api/me/dialer/campaigns/:campaignId/status', requireAuth, async (req
     if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
 
     if (action === 'start') {
+      if (!normalizeDialerCallerId(campaign.caller_id) || !String(campaign.audio_playback_uri || '').trim()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Set a Caller ID and select an audio recording before starting the campaign.'
+        });
+      }
       // Balance gate: prevent starting campaigns when the user's balance is below the minimum credit.
       let credit = null;
       try {
@@ -10161,190 +10270,6 @@ app.get('/api/me/dialer/campaigns/:campaignId/leads-by-status', requireAuth, asy
   }
 });
 
-// Upload campaign audio (WAV)
-const campaignAudioUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
-  fileFilter: (req, file, cb) => {
-    const mime = String(file.mimetype || '').toLowerCase();
-    if (mime === 'audio/wav' || mime === 'audio/x-wav' || mime === 'audio/wave') {
-      cb(null, true);
-    } else {
-      cb(new Error('Only WAV audio files are supported'));
-    }
-  }
-});
-
-app.post('/api/me/dialer/campaigns/:campaignId/audio', requireAuth, campaignAudioUpload.single('audio'), async (req, res) => {
-  try {
-    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
-    const userId = req.session.userId;
-    const campaignId = Number(req.params.campaignId || 0);
-    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
-    
-    const campaign = await fetchDialerCampaignById({ userId, campaignId });
-    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
-    
-    const file = req.file;
-    if (!file || !file.buffer) {
-      return res.status(400).json({ success: false, message: 'Missing audio file (field name: audio)' });
-    }
-    
-    const filename = String(file.originalname || 'campaign.wav').slice(0, 255);
-    const mime = String(file.mimetype || 'audio/wav').slice(0, 128);
-    const size = file.buffer.length;
-    
-    // Simple WAV validation: check for RIFF header
-    if (file.buffer.length < 44) {
-      return res.status(400).json({ success: false, message: 'Invalid WAV file: file too small' });
-    }
-    const header = file.buffer.toString('ascii', 0, 4);
-    if (header !== 'RIFF') {
-      return res.status(400).json({ success: false, message: 'Invalid WAV file: missing RIFF header' });
-    }
-    
-    await pool.execute(
-      `UPDATE dialer_campaigns
-       SET campaign_audio_blob = ?,
-           campaign_audio_filename = ?,
-           campaign_audio_mime = ?,
-           campaign_audio_size = ?,
-           updated_at = NOW()
-       WHERE id = ? AND user_id = ?`,
-      [file.buffer, filename, mime, size, campaignId, userId]
-    );
-    
-    return res.json({
-      success: true,
-      data: {
-        filename,
-        size,
-        mime
-      }
-    });
-  } catch (e) {
-    if (DEBUG) console.error('[dialer.campaign-audio.upload] error:', e?.message || e);
-    return res.status(500).json({ success: false, message: e?.message || 'Failed to upload campaign audio' });
-  }
-});
-
-// Download campaign audio (user endpoint)
-app.get('/api/me/dialer/campaigns/:campaignId/audio', requireAuth, async (req, res) => {
-  try {
-    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
-    const userId = req.session.userId;
-    const campaignId = Number(req.params.campaignId || 0);
-    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
-    
-    const [rows] = await pool.execute(
-      `SELECT campaign_audio_blob, campaign_audio_filename, campaign_audio_mime
-       FROM dialer_campaigns
-       WHERE id = ? AND user_id = ? AND status <> 'deleted'
-       LIMIT 1`,
-      [campaignId, userId]
-    );
-    const row = rows && rows[0] ? rows[0] : null;
-    
-    if (!row || !row.campaign_audio_blob) {
-      return res.status(404).json({ success: false, message: 'No campaign audio found' });
-    }
-    
-    const filename = row.campaign_audio_filename || 'campaign.wav';
-    const mime = row.campaign_audio_mime || 'audio/wav';
-    const blob = row.campaign_audio_blob;
-    
-    res.setHeader('Content-Type', mime);
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Length', blob.length);
-    return res.send(blob);
-  } catch (e) {
-    if (DEBUG) console.error('[dialer.campaign-audio.download] error:', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to download campaign audio' });
-  }
-});
-
-// Delete campaign audio
-app.delete('/api/me/dialer/campaigns/:campaignId/audio', requireAuth, async (req, res) => {
-  try {
-    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
-    const userId = req.session.userId;
-    const campaignId = Number(req.params.campaignId || 0);
-    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
-    
-    const campaign = await fetchDialerCampaignById({ userId, campaignId });
-    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
-    
-    await pool.execute(
-      `UPDATE dialer_campaigns
-       SET campaign_audio_blob = NULL,
-           campaign_audio_filename = NULL,
-           campaign_audio_mime = NULL,
-           campaign_audio_size = NULL,
-           updated_at = NOW()
-       WHERE id = ? AND user_id = ?`,
-      [campaignId, userId]
-    );
-    
-    return res.json({ success: true });
-  } catch (e) {
-    if (DEBUG) console.error('[dialer.campaign-audio.delete] error:', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to delete campaign audio' });
-  }
-});
-
-// Bot endpoint: stream campaign audio (authenticated by PORTAL_AGENT_ACTION_TOKEN if set)
-app.get('/api/ai/agent/campaigns/:campaignId/audio', async (req, res) => {
-  try {
-    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
-    
-    // Authenticate using PORTAL_AGENT_ACTION_TOKEN (optional - only enforced if token is configured)
-    const authHeader = String(req.headers.authorization || '');
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    const expectedToken = String(process.env.PORTAL_AGENT_ACTION_TOKEN || '').trim();
-    
-    if (DEBUG) {
-      console.log('[ai.agent.campaigns.audio] Auth check:', {
-        hasAuthHeader: !!authHeader,
-        tokenLength: token.length,
-        expectedTokenLength: expectedToken.length,
-        tokenMatch: token === expectedToken,
-        tokenRequired: !!expectedToken
-      });
-    }
-    
-    // Only enforce token authentication if PORTAL_AGENT_ACTION_TOKEN is configured
-    if (expectedToken && token !== expectedToken) {
-      if (DEBUG) console.log('[ai.agent.campaigns.audio] Auth failed: token mismatch');
-      return res.status(401).json({ success: false, message: 'Unauthorized' });
-    }
-    
-    const campaignId = Number(req.params.campaignId || 0);
-    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
-    
-    const [rows] = await pool.execute(
-      `SELECT campaign_audio_blob, campaign_audio_filename, campaign_audio_mime
-       FROM dialer_campaigns
-       WHERE id = ? AND status <> 'deleted'
-       LIMIT 1`,
-      [campaignId]
-    );
-    const row = rows && rows[0] ? rows[0] : null;
-    
-    if (!row || !row.campaign_audio_blob) {
-      return res.status(404).json({ success: false, message: 'No campaign audio found' });
-    }
-    
-    const mime = row.campaign_audio_mime || 'audio/wav';
-    const blob = row.campaign_audio_blob;
-    
-    res.setHeader('Content-Type', mime);
-    res.setHeader('Content-Length', blob.length);
-    return res.send(blob);
-  } catch (e) {
-    if (DEBUG) console.error('[ai.agent.campaigns.audio] error:', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to stream campaign audio' });
-  }
-});
 
 // Debug endpoint: manually update call status for testing
 app.post('/api/me/dialer/debug/update-call-status', requireAuth, async (req, res) => {
@@ -10412,70 +10337,26 @@ function buildDialerCallIdentifiers({ campaignId, leadId }) {
   const callDomain = `dialer-${campaignId}`.slice(0, 64);
   return { callId, callDomain };
 }
-
-function buildDialerDailyRoomProperties() {
-  const props = {
-    enable_dialout: true
+function parseDialerCallIdentifier(callId) {
+  const match = String(callId || '').match(/^d(\d+)l(\d+)-/i);
+  if (!match) return { campaignId: null, leadId: null };
+  return {
+    campaignId: Number(match[1]) || null,
+    leadId: Number(match[2]) || null
   };
-  if (DIALER_DAILY_ROOM_TTL_SECONDS > 0) {
-    props.exp = Math.floor(Date.now() / 1000) + DIALER_DAILY_ROOM_TTL_SECONDS;
-  }
-  return props;
 }
 
-async function resolveDialerCallerId({ userId, agentId }) {
-  if (!pool) return '';
-  try {
-    const [rows] = await pool.execute(
-      'SELECT daily_number_id FROM ai_numbers WHERE user_id = ? AND agent_id = ? AND cancel_pending = 0 ORDER BY updated_at DESC LIMIT 1',
-      [userId, agentId]
-    );
-    const row = rows && rows[0] ? rows[0] : null;
-    if (row && row.daily_number_id) return String(row.daily_number_id);
-  } catch {}
-
-  try {
-    const [rows] = await pool.execute(
-      'SELECT daily_number_id FROM ai_numbers WHERE user_id = ? AND cancel_pending = 0 ORDER BY updated_at DESC LIMIT 1',
-      [userId]
-    );
-    const row = rows && rows[0] ? rows[0] : null;
-    if (row && row.daily_number_id) return String(row.daily_number_id);
-  } catch {}
-
-  return '';
-}
 
 async function startDialerLeadCall({ campaign, lead }) {
   if (!pool || !campaign || !lead) return { ok: false };
   const campaignId = Number(campaign.id);
   const userId = Number(campaign.user_id);
   const leadId = Number(lead.id);
-  const agentId = Number(campaign.ai_agent_id) || 0;
+  const callerId = normalizeDialerCallerId(campaign.caller_id);
+  const audioUrl = String(campaign.audio_playback_uri || '').trim();
+  const phoneNumber = String(lead.phone_number || '').trim();
 
-  // Check if campaign has audio (audio-only mode)
-  // Note: Even audio-only campaigns require an AI agent for the Pipecat endpoint
-  // The agent won't be used for AI - bot.py will play audio instead
-  const hasCampaignAudio = Boolean(campaign.campaign_audio_blob || campaign.campaign_audio_size);
-  const audioOnlyMode = hasCampaignAudio;  // Audio-only mode when campaign has audio
-
-  let agent = null;
-  if (agentId) {
-    try {
-      const [rows] = await pool.execute(
-        'SELECT id, display_name, pipecat_agent_name, pipecat_region FROM ai_agents WHERE id = ? AND user_id = ? LIMIT 1',
-        [agentId, userId]
-      );
-      agent = rows && rows[0] ? rows[0] : null;
-    } catch (e) {
-      if (DEBUG) console.warn('[dialer.worker] Failed to lookup AI agent:', e?.message || e);
-      agent = null;
-    }
-  }
-
-  // Even for audio-only campaigns, we need a valid Pipecat agent endpoint
-  // The agent won't be used for AI, but we need the service to exist
-  if (!agent || !agent.pipecat_agent_name) {
+  if (!phoneNumber || !callerId || !audioUrl) {
     try {
       await pool.execute(
         'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
@@ -10485,65 +10366,32 @@ async function startDialerLeadCall({ campaign, lead }) {
         `UPDATE dialer_call_logs
          SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?)
          WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
-        ['Missing Pipecat agent configuration - please select an AI agent (required for Pipecat endpoint)', leadId]
+        ['Campaign is missing caller ID or audio selection', leadId]
       );
     } catch {}
     return { ok: false };
   }
 
-  if (audioOnlyMode && !hasCampaignAudio) {
-    try {
-      await pool.execute(
-        'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
-        ['failed', leadId, userId]
-      );
-      await pool.execute(
-        `UPDATE dialer_call_logs
-         SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?)
-         WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
-        ['Audio-only campaign requires audio file', leadId]
-      );
-    } catch {}
-    return { ok: false };
-  }
-
-  const callerId = await resolveDialerCallerId({ userId, agentId });
   const { callId, callDomain } = buildDialerCallIdentifiers({ campaignId, leadId });
-  const dialoutSettings = {
-    phoneNumber: String(lead.phone_number || '').trim()
-  };
-  if (callerId) dialoutSettings.callerId = String(callerId);
-
-  // Build campaign audio URL if in audio-only mode
-  let campaignAudioUrl = '';
-  if (audioOnlyMode) {
-    const portalBase = String(process.env.PUBLIC_BASE_URL || process.env.PORTAL_BASE_URL || '').trim();
-    if (portalBase) {
-      campaignAudioUrl = `${portalBase}/api/ai/agent/campaigns/${campaignId}/audio`;
-    }
-  }
-
   const metadata = {
     campaign_id: campaignId,
     lead_id: leadId,
-    phone_number: lead.phone_number,
+    phone_number: phoneNumber,
+    caller_id: callerId,
+    audio_url: audioUrl,
     call_id: callId,
-    call_domain: callDomain,
-    dialout_settings: dialoutSettings,
-    audio_only_mode: audioOnlyMode,
-    campaign_audio_url: campaignAudioUrl || null
+    call_domain: callDomain
   };
 
   try {
     await pool.execute(
       `INSERT INTO dialer_call_logs
         (campaign_id, lead_id, user_id, ai_agent_id, call_id, status, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, NULL, ?, ?, ?)`,
       [
         campaignId,
         leadId,
         userId,
-        agentId || null,  // Allow NULL for audio-only campaigns
         callId,
         'queued',
         JSON.stringify(metadata)
@@ -10553,34 +10401,24 @@ async function startDialerLeadCall({ campaign, lead }) {
     if (DEBUG) console.warn('[dialer.worker] Failed to insert call log row:', e?.message || e);
   }
 
-  const dailyRoomProperties = buildDialerDailyRoomProperties();
-
-  const startBody = {
-    createDailyRoom: true,
-    dailyRoomProperties,
-    body: {
-      dialout_settings: [dialoutSettings],
-      call_id: callId,
-      call_domain: callDomain,
-      mode: 'dialout',
-      dialer: {
-        campaign_id: campaignId,
-        lead_id: leadId
-      },
-      audio_only_mode: audioOnlyMode,
-      campaign_audio_url: campaignAudioUrl || null
+  const callbackUrl = getVoiceApiCallbackUrl();
+  const callPayload = {
+    toNumber: phoneNumber,
+    fromNumber: callerId,
+    audioUrl,
+    metadata: {
+      callId,
+      campaignId,
+      leadId
     }
   };
-
-  // Use the agent's Pipecat service name
-  // For audio-only mode, the agent endpoint exists but bot.py will play audio instead of using AI
-  const agentNameForStart = agent.pipecat_agent_name;
+  if (callbackUrl) callPayload.webhookUrl = callbackUrl;
 
   try {
-    await pipecatApiCall({
+    await dialerAudioApiRequest({
       method: 'POST',
-      path: `/public/${encodeURIComponent(agentNameForStart)}/start`,
-      body: startBody
+      path: '/call',
+      data: callPayload
     });
 
     try {
@@ -10589,59 +10427,17 @@ async function startDialerLeadCall({ campaign, lead }) {
         ['dialing', leadId, userId]
       );
       await pool.execute(
-        'UPDATE dialer_call_logs SET status = ? WHERE lead_id = ? ORDER BY id DESC LIMIT 1',
-        ['dialing', leadId]
+        `UPDATE dialer_call_logs
+         SET status = 'dialing', result = 'submitted'
+         WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
+        [leadId]
       );
     } catch {}
 
     return { ok: true };
   } catch (e) {
-    const status = e?.status;
-    const code = e?.data?.code;
-    const msg = e?.message || 'Failed to start Pipecat dial-out';
-
-    const isCapacity = status === 429 && (
-      code === 'PCC-AGENT-AT-CAPACITY'
-      || String(msg).toLowerCase().includes('maximum instances')
-      || String(msg).toLowerCase().includes('at capacity')
-    );
-
-    if (isCapacity) {
-      if (agentId) {
-        dialerAgentBackoffUntil.set(agentId, Date.now() + DIALER_CAPACITY_BACKOFF_MS);
-        scheduleDialerResumeAfterBackoff(agentId);
-      }
-      if (DEBUG) console.warn('[dialer.worker] Pipecat at capacity; backing off', {
-        campaignId,
-        leadId,
-        agentId,
-        status,
-        code,
-        backoffMs: DIALER_CAPACITY_BACKOFF_MS
-      });
-
-      // Capacity is not a real call failure; return lead to pending so it can be retried.
-      try {
-        await pool.execute(
-          `UPDATE dialer_leads
-           SET status = 'pending', attempt_count = GREATEST(0, attempt_count - 1)
-           WHERE id = ? AND user_id = ? LIMIT 1`,
-          [leadId, userId]
-        );
-      } catch {}
-
-      // Remove the queued call log row since the call was never started.
-      try {
-        await pool.execute(
-          'DELETE FROM dialer_call_logs WHERE call_id = ? AND lead_id = ? LIMIT 1',
-          [callId, leadId]
-        );
-      } catch {}
-
-      return { ok: false, capacity: true };
-    }
-
-    if (DEBUG) console.warn('[dialer.worker] Pipecat dial-out failed:', msg);
+    const msg = e?.response?.data?.message || e?.message || 'Failed to start outbound call';
+    if (DEBUG) console.warn('[dialer.worker] outbound call failed:', msg);
     try {
       await pool.execute(
         'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
@@ -10658,16 +10454,12 @@ async function startDialerLeadCall({ campaign, lead }) {
   }
 }
 
-const dialerAgentBackoffUntil = new Map();
-const dialerAgentBackoffResumeTimers = new Map();
-
 let dialerWorkerKickTimer = null;
 function requestDialerWorkerTick({ reason, immediate = false } = {}) {
   // Fire-and-forget dialer scheduler kick used by routes and webhooks.
   // Debounced by default to coalesce bursts of dialout events.
   try {
     if (!pool) return;
-    if (!PIPECAT_PUBLIC_API_KEY) return;
 
     if (immediate) {
       if (dialerWorkerKickTimer) {
@@ -10688,171 +10480,12 @@ function requestDialerWorkerTick({ reason, immediate = false } = {}) {
   } catch {}
 }
 
-function scheduleDialerResumeAfterBackoff(agentId) {
-  try {
-    const aid = Number(agentId) || 0;
-    if (!aid) return;
-
-    const until = Number(dialerAgentBackoffUntil.get(aid) || 0);
-    const delay = Math.max(0, until - Date.now());
-
-    const existing = dialerAgentBackoffResumeTimers.get(aid);
-    if (existing) {
-      try { clearTimeout(existing); } catch {}
-      dialerAgentBackoffResumeTimers.delete(aid);
-    }
-
-    // When the backoff expires, kick the worker to refill any open slots.
-    const t = setTimeout(() => {
-      dialerAgentBackoffResumeTimers.delete(aid);
-      requestDialerWorkerTick({ reason: 'capacity_backoff_expired', immediate: false });
-    }, delay + 25);
-
-    dialerAgentBackoffResumeTimers.set(aid, t);
-  } catch {}
-}
-
-// Pipecat service status cache (used to gate starts when Pipecat is already at capacity).
-const pipecatServiceStatusCache = new Map();
-const pipecatServiceStatusInFlight = new Map();
-
-function parseNonNegativeIntMaybe(v) {
-  if (v === undefined || v === null) return null;
-  const s = String(v).trim();
-  if (s === '') return null;
-  const n = parseInt(s, 10);
-  if (!Number.isFinite(n) || n < 0) return null;
-  return n;
-}
-
-function parsePositiveIntMaybe(v) {
-  const n = parseNonNegativeIntMaybe(v);
-  return (n != null && n > 0) ? n : null;
-}
-
-function inferPipecatActiveSessionCount(service) {
-  const s = (service && typeof service === 'object') ? service : {};
-  const candidates = [
-    s.activeSessionCount,
-    s.active_session_count,
-    s.activeSessions,
-    s.active_sessions,
-  ];
-  for (const c of candidates) {
-    const n = parseNonNegativeIntMaybe(c);
-    if (n != null) return n;
-  }
-  return null;
-}
-
-function inferPipecatMaxSessions(service) {
-  const s = (service && typeof service === 'object') ? service : {};
-  const as = (s.autoScaling && typeof s.autoScaling === 'object')
-    ? s.autoScaling
-    : ((s.autoscaling && typeof s.autoscaling === 'object')
-      ? s.autoscaling
-      : ((s.auto_scaling && typeof s.auto_scaling === 'object') ? s.auto_scaling : {}));
-
-  // 1) Explicit service-wide max fields (if provided by API)
-  const explicitCandidates = [
-    s.maxInstances,
-    s.max_instances,
-    s.maxSessionCount,
-    s.max_session_count,
-    s.maxSessions,
-    s.max_sessions,
-  ];
-  for (const c of explicitCandidates) {
-    const n = parsePositiveIntMaybe(c);
-    if (n != null) return n;
-  }
-
-  // 2) Autoscaling: Pipecat commonly models capacity as concurrency per replica * maxReplicas
-  const concurrency = parsePositiveIntMaybe(as.concurrency);
-  const maxReplicas = parsePositiveIntMaybe(as.maxReplicas);
-  const maxAgents = parsePositiveIntMaybe(as.maxAgents);
-  if (concurrency != null && maxReplicas != null) return concurrency * maxReplicas;
-  if (concurrency != null && maxAgents != null) return concurrency * maxAgents;
-
-  // 3) Fallback: if only maxReplicas/maxAgents exists, assume 1 session per replica
-  if (maxReplicas != null) return maxReplicas;
-  if (maxAgents != null) return maxAgents;
-
-  // 4) Last resort: other possible autoscaling fields
-  const otherCandidates = [
-    as.max_instances,
-    as.maxSessions,
-    as.max_sessions,
-  ];
-  for (const c of otherCandidates) {
-    const n = parsePositiveIntMaybe(c);
-    if (n != null) return n;
-  }
-
-  return null;
-}
-
-async function getPipecatServiceStatusCached(serviceName) {
-  const name = String(serviceName || '').trim();
-  if (!name) return null;
-
-  const now = Date.now();
-  const cached = pipecatServiceStatusCache.get(name);
-  if (cached && (now - Number(cached.atMs || 0)) < PIPECAT_SERVICE_STATUS_CACHE_MS) {
-    return cached.data || null;
-  }
-
-  const inflight = pipecatServiceStatusInFlight.get(name);
-  if (inflight) return inflight;
-
-  const p = (async () => {
-    try {
-      const data = await pipecatApiCall({
-        method: 'GET',
-        path: `/agents/${encodeURIComponent(name)}`,
-      });
-      pipecatServiceStatusCache.set(name, { atMs: Date.now(), data });
-      return data;
-    } catch (e) {
-      // Negative cache to avoid request storms on repeated failures.
-      pipecatServiceStatusCache.set(name, { atMs: Date.now(), data: null });
-      return null;
-    } finally {
-      pipecatServiceStatusInFlight.delete(name);
-    }
-  })();
-
-  pipecatServiceStatusInFlight.set(name, p);
-  return p;
-}
-
-async function getPipecatServiceCapacityInfo(serviceName) {
-  const name = String(serviceName || '').trim();
-  if (!name) return null;
-  if (!DIALER_PIPECAT_ACTIVE_SESSION_GATING) return null;
-  if (!PIPECAT_API_KEY) return null;
-
-  const status = await getPipecatServiceStatusCached(name);
-  if (!status) return null;
-
-  const activeSessionCount = inferPipecatActiveSessionCount(status);
-  if (activeSessionCount == null) return null;
-
-  const maxSessions = inferPipecatMaxSessions(status) || DIALER_MAX_CONCURRENCY;
-  const effectiveMax = Math.max(0, Number(maxSessions || 0) - DIALER_PIPECAT_CAPACITY_HEADROOM);
-
-  return { activeSessionCount, maxSessions, effectiveMax };
-}
 
 let dialerWorkerRunning = false;
 async function runDialerWorkerTick() {
   if (!pool) return;
   if (dialerWorkerRunning) {
     if (DEBUG) console.log('[dialer.worker] tick skipped (already running)');
-    return;
-  }
-  if (!PIPECAT_PUBLIC_API_KEY) {
-    if (DEBUG) console.warn('[dialer.worker] PIPECAT_PUBLIC_API_KEY not set; skipping tick');
     return;
   }
 
@@ -10888,11 +10521,8 @@ async function runDialerWorkerTick() {
   dialerWorkerRunning = true;
   try {
     const [campaigns] = await pool.query(
-      `SELECT c.id, c.user_id, c.name, c.ai_agent_id, c.ai_agent_name, c.concurrency_limit,
-              c.campaign_audio_blob, c.campaign_audio_size,
-              a.pipecat_agent_name
+      `SELECT c.id, c.user_id, c.name, c.caller_id, c.audio_playback_uri, c.concurrency_limit
        FROM dialer_campaigns c
-       LEFT JOIN ai_agents a ON a.id = c.ai_agent_id AND a.user_id = c.user_id
        WHERE c.status = 'running'
        ORDER BY c.id DESC
        LIMIT 200`
@@ -10994,39 +10624,6 @@ async function runDialerWorkerTick() {
       }
     }
 
-    // Aggregate in-progress across campaigns for per-agent limiting.
-    const inProgressByAgentId = new Map();
-    for (const c of campaignRows) {
-      const agentId = Number(c.ai_agent_id) || 0;
-      if (!agentId) continue;
-      const campaignId = Number(c.id);
-      const cnt = inProgressByCampaignId.get(campaignId) || 0;
-      inProgressByAgentId.set(agentId, (inProgressByAgentId.get(agentId) || 0) + cnt);
-    }
-
-    // Optional: Pipecat service activeSessionCount gating (cached).
-    const reservedByServiceName = new Map();
-    const pipecatCapacityByServiceName = new Map();
-    const loggedFullServices = new Set();
-
-    if (DIALER_PIPECAT_ACTIVE_SESSION_GATING && PIPECAT_API_KEY) {
-      try {
-        const serviceNames = Array.from(new Set(
-          campaignRows
-            .map(r => String(r.pipecat_agent_name || '').trim())
-            .filter(Boolean)
-        ));
-
-        if (serviceNames.length) {
-          await Promise.all(serviceNames.map(async (svc) => {
-            const info = await getPipecatServiceCapacityInfo(svc);
-            if (info) pipecatCapacityByServiceName.set(svc, info);
-          }));
-        }
-      } catch (e) {
-        if (DEBUG) console.warn('[dialer.gating] Failed to prefetch Pipecat service status:', e?.message || e);
-      }
-    }
 
     // Optional global cap across all campaigns to avoid hitting Pipecat/Daily dial-out limits.
     let globalInProgress = 0;
@@ -11047,17 +10644,12 @@ async function runDialerWorkerTick() {
     for (const c of campaignRows) {
       const campaignId = Number(c.id);
       const userId = Number(c.user_id);
-      const agentId = Number(c.ai_agent_id) || 0;
 
-      if (agentId) {
-        const until = Number(dialerAgentBackoffUntil.get(agentId) || 0);
-        if (until > Date.now()) {
-          if (DEBUG) {
-            const remainSec = Math.ceil((until - Date.now()) / 1000);
-            console.log(`[dialer.worker] Skipping campaign ${campaignId} (agent ${agentId}) due to capacity backoff (${remainSec}s)`);
-          }
-          continue;
-        }
+      const callerIdPreview = normalizeDialerCallerId(c.caller_id);
+      const audioUri = String(c.audio_playback_uri || '').trim();
+      if (!callerIdPreview || !audioUri) {
+        if (DEBUG) console.warn('[dialer.worker] Campaign missing caller ID or audio selection; skipping', { campaignId });
+        continue;
       }
 
       const configuredConcurrency = parseInt(String(c.concurrency_limit ?? ''), 10);
@@ -11072,12 +10664,7 @@ async function runDialerWorkerTick() {
       }
 
       const inProgressCampaign = Number(inProgressByCampaignId.get(campaignId) || 0);
-      const inProgressAgent = agentId ? Number(inProgressByAgentId.get(agentId) || 0) : 0;
-
-      const availableCampaign = Math.max(0, concurrency - inProgressCampaign);
-      const availableAgent = agentId ? Math.max(0, DIALER_MAX_CONCURRENCY_PER_AGENT - inProgressAgent) : availableCampaign;
-
-      let available = Math.max(0, Math.min(availableCampaign, availableAgent));
+      let available = Math.max(0, concurrency - inProgressCampaign);
 
       if (available && DIALER_GLOBAL_MAX_DIALOUT > 0) {
         const globalAvailable = Math.max(0, DIALER_GLOBAL_MAX_DIALOUT - globalInProgress);
@@ -11097,31 +10684,6 @@ async function runDialerWorkerTick() {
 
       if (!available) continue;
 
-      const serviceName = String(c.pipecat_agent_name || '').trim();
-      if (available && DIALER_PIPECAT_ACTIVE_SESSION_GATING && PIPECAT_API_KEY && serviceName) {
-        const cap = pipecatCapacityByServiceName.get(serviceName);
-        if (cap && Number.isFinite(cap.effectiveMax)) {
-          const reserved = Number(reservedByServiceName.get(serviceName) || 0);
-          const availableService = Math.max(
-            0,
-            Number(cap.effectiveMax || 0) - Number(cap.activeSessionCount || 0) - reserved
-          );
-
-          available = Math.max(0, Math.min(available, availableService));
-          if (!available) {
-            if (DEBUG && !loggedFullServices.has(serviceName)) {
-              loggedFullServices.add(serviceName);
-              console.log('[dialer.gating] Pipecat service at capacity; skipping scheduling', {
-                serviceName,
-                activeSessionCount: cap.activeSessionCount,
-                effectiveMax: cap.effectiveMax,
-                headroom: DIALER_PIPECAT_CAPACITY_HEADROOM
-              });
-            }
-            continue;
-          }
-        }
-      }
 
       const limit = Math.min(available, DIALER_MAX_CONCURRENCY);
       const [leads] = await pool.query(
@@ -11146,20 +10708,10 @@ async function runDialerWorkerTick() {
 
         // Reserve the slot for this tick (prevents overscheduling across campaigns sharing an agent).
         inProgressByCampaignId.set(campaignId, (Number(inProgressByCampaignId.get(campaignId) || 0) + 1));
-        if (agentId) {
-          inProgressByAgentId.set(agentId, (Number(inProgressByAgentId.get(agentId) || 0) + 1));
-        }
-        if (DIALER_PIPECAT_ACTIVE_SESSION_GATING && PIPECAT_API_KEY && serviceName) {
-          reservedByServiceName.set(serviceName, (Number(reservedByServiceName.get(serviceName) || 0) + 1));
-        }
         if (DIALER_GLOBAL_MAX_DIALOUT > 0) {
           globalInProgress += 1;
         }
-
-        const startRes = await startDialerLeadCall({ campaign: c, lead });
-        if (startRes && startRes.capacity) {
-          // Stop scheduling more calls for this agent/campaign until backoff expires.
-          break;
+        await startDialerLeadCall({ campaign: c, lead });
         }
       }
     }
@@ -17714,6 +17266,103 @@ async function buildCallerMemoryForDialin({ userId, agentId, fromDigits, exclude
   }
 }
 
+app.post('/webhooks/voice/dialer', async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    if (VOICE_API_WEBHOOK_SECRET) {
+      const provided = String(
+        req.headers['x-api-key']
+        || req.headers['x-webhook-secret']
+        || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+        || ''
+      ).trim();
+      if (!provided || provided !== VOICE_API_WEBHOOK_SECRET) {
+        return res.status(401).json({ success: false, message: 'Invalid webhook secret' });
+      }
+    }
+
+    const body = (req.body && typeof req.body === 'object') ? req.body : {};
+    const callId = String(body.callId || body.call_id || body.metadata?.callId || '').trim();
+    if (!callId) {
+      return res.status(400).json({ success: false, message: 'callId is required' });
+    }
+
+    const parsedIds = parseDialerCallIdentifier(callId);
+    const payloadCampaignId = Number(body.campaignId ?? body.metadata?.campaignId) || null;
+    const payloadLeadId = Number(body.leadId ?? body.metadata?.leadId) || null;
+
+    const [rows] = await pool.execute(
+      'SELECT id, campaign_id, lead_id, user_id, metadata FROM dialer_call_logs WHERE call_id = ? LIMIT 1',
+      [callId]
+    );
+    const callRow = rows && rows[0] ? rows[0] : null;
+    if (!callRow) {
+      if (DEBUG) console.warn('[voice.webhook] call_id not found', callId);
+      return res.status(202).json({ success: true, ignored: true });
+    }
+
+    const campaignId = payloadCampaignId ?? Number(callRow.campaign_id) || parsedIds.campaignId;
+    const leadId = payloadLeadId ?? Number(callRow.lead_id) || parsedIds.leadId;
+
+    const statusRaw = String(body.status || body.callStatus || '').trim().toLowerCase();
+    const resultRaw = String(body.result || body.outcome || '').trim().toLowerCase();
+    const durationSecRaw = Number(body.durationSec ?? body.duration_sec ?? body.duration ?? body.billsec ?? null);
+    const priceRaw = body.price ?? body.cost ?? null;
+
+    let metadataJson = callRow.metadata;
+    try {
+      const current = metadataJson ? JSON.parse(metadataJson) : {};
+      current.voiceWebhook = body;
+      metadataJson = JSON.stringify(current);
+    } catch {
+      metadataJson = JSON.stringify({ voiceWebhook: body });
+    }
+
+    const callStatus = statusRaw || (resultRaw ? `result:${resultRaw}` : 'completed');
+    const callResult = resultRaw || null;
+    const durationValue = Number.isFinite(durationSecRaw) ? durationSecRaw : null;
+    const priceValue = priceRaw != null && Number.isFinite(Number(priceRaw)) ? Number(priceRaw) : null;
+
+    await pool.execute(
+      `UPDATE dialer_call_logs
+         SET status = ?, result = COALESCE(NULLIF(?, ''), result),
+             duration_sec = COALESCE(?, duration_sec),
+             price = COALESCE(?, price),
+             metadata = ?,
+             updated_at = NOW()
+       WHERE call_id = ?
+       LIMIT 1`,
+      [callStatus, callResult || null, durationValue, priceValue, metadataJson, callId]
+    );
+
+    let leadStatus = null;
+    if (statusRaw === 'submitted' || statusRaw === 'dialing' || statusRaw === 'in-progress') {
+      leadStatus = 'dialing';
+    } else if (statusRaw === 'failed' || callResult === 'failed') {
+      leadStatus = 'failed';
+    } else if (callResult === 'voicemail') {
+      leadStatus = 'voicemail';
+    } else if (callResult === 'transferred') {
+      leadStatus = 'transferred';
+    } else if (callResult === 'answered' || statusRaw === 'completed' || statusRaw === 'finished') {
+      leadStatus = 'completed';
+    }
+
+    if (leadStatus && leadId) {
+      await pool.execute(
+        `UPDATE dialer_leads
+           SET status = ?, last_call_at = NOW(), updated_at = NOW()
+         WHERE id = ? LIMIT 1`,
+        [leadStatus, leadId]
+      );
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    if (DEBUG) console.error('[voice.webhook] error', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Webhook processing failed' });
+  }
+});
 // Daily pinless dial-in webhook (room_creation_api) -> start Pipecat Cloud session.
 // This lets us log inbound AI calls into the user's Call History.
 app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
