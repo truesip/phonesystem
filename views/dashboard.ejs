@@ -119,6 +119,24 @@
       flex:0 0 auto;
       opacity:.65;
     }
+    .nav-icon--placeholder{
+      background:transparent;
+      border-radius:50%;
+      box-shadow:none;
+      opacity:0;
+    }
+    aside a.sidebar-subnav{
+      font-size:12.5px;
+      padding:9px 14.4px 9px 36px;
+      color:var(--muted2);
+      border-top:none;
+      border-bottom:1px solid rgba(0,0,0,.04);
+    }
+    aside a.sidebar-subnav:hover{
+      background: rgba(16,185,129,.10);
+      color:var(--text);
+      text-decoration:none;
+    }
     aside a.active .nav-icon{opacity:1}
 
     .sidebar-user{
@@ -329,6 +347,7 @@
     .dialer-content{display:flex;gap:18px;align-items:flex-start}
     .dialer-main{flex:3;min-width:0}
     .dialer-audio-panel{flex:1;min-width:260px;background:#ffffff;border:1px solid rgba(148,163,184,.35);border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(15,23,42,.08)}
+    .dialer-audio-panel.highlight{box-shadow:0 0 0 3px rgba(16,185,129,.25);transition:box-shadow .25s ease;}
     .dialer-audio-panel h3{margin:0;font-size:16px}
     .dialer-audio-list{list-style:none;margin:0;padding:0;max-height:360px;overflow:auto}
     .dialer-audio-item{border:1px solid rgba(148,163,184,.4);border-radius:10px;padding:8px;margin-bottom:8px;display:flex;flex-direction:column;gap:4px}
@@ -967,6 +986,7 @@
       <a href="#overview" id="tab-overview" class="active"><img class="nav-icon" src="/Icon/Overview.ico" alt="" aria-hidden="true"><span>Overview</span></a>
       <a href="#ai" id="tab-ai"><img class="nav-icon" src="/Icon/AI%20Agent.ico" alt="" aria-hidden="true"><span>AI Agent</span></a>
       <a href="#dialer" id="tab-dialer"><img class="nav-icon" src="/Icon/Outbound-Dialer.ico" alt="" aria-hidden="true"><span>Auto Dialer</span></a>
+      <a href="#dialer-audio" id="tab-dialer-audio" class="sidebar-subnav"><span class="nav-icon nav-icon--placeholder" aria-hidden="true"></span><span>Audio Library</span></a>
       <a href="#cdr" id="tab-cdr"><img class="nav-icon" src="/Icon/Call%20History.ico" alt="" aria-hidden="true"><span>Call History</span></a>
       <a href="#billing" id="tab-billing"><img class="nav-icon" src="/Icon/Billing%20History.ico" alt="" aria-hidden="true"><span>Billing History</span></a>
       <a href="#profile" id="tab-profile"><img class="nav-icon" src="/Icon/Profile.ico" alt="" aria-hidden="true"><span>Profile</span></a>
@@ -1104,7 +1124,7 @@
             </div>
             <div id="dialer-empty" class="muted">Loading…</div>
           </div>
-          <aside class="dialer-audio-panel">
+          <aside class="dialer-audio-panel" id="dialer-audio-library-panel">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
               <h3 style="margin:0">Audio Library</h3>
               <button id="dialerAudioRefreshBtn" class="btn--muted" type="button">Refresh</button>
@@ -2305,6 +2325,8 @@
     let billingData = [];
     const tabs = {overview:$('#tab-overview'), profile:$('#tab-profile'), dialer:$('#tab-dialer'), billing:$('#tab-billing'), ai:$('#tab-ai'), cdr:$('#tab-cdr')};
     const views = {overview:$('#view-overview'), profile:$('#view-profile'), dialer:$('#view-dialer'), billing:$('#view-billing'), ai:$('#view-ai'), cdr:$('#view-cdr')};
+    const tabDialerAudio = document.getElementById('tab-dialer-audio');
+    const dialerAudioPanel = document.getElementById('dialer-audio-library-panel');
     function activate(name){
       Object.keys(tabs).forEach(k=>{ tabs[k].classList.toggle('active',k===name); views[k].style.display = (k===name?'block':'none'); });
     }
@@ -2418,6 +2440,20 @@
     tabs.billing.addEventListener('click',e=>{e.preventDefault();activate('billing');billingPage=0;loadBillingHistory();});
     tabs.ai.addEventListener('click',e=>{e.preventDefault();activate('ai');activateAiSubtab('agents');loadAiAgents();loadAiNumbers();});
     tabs.cdr.addEventListener('click',e=>{e.preventDefault();activate('cdr');cdrPage=0;loadCdr();});
+    if (tabDialerAudio) {
+      tabDialerAudio.addEventListener('click', (e) => {
+        e.preventDefault();
+        activate('dialer');
+        openDialerTab();
+        setTimeout(() => {
+          if (dialerAudioPanel) {
+            dialerAudioPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            dialerAudioPanel.classList.add('highlight');
+            setTimeout(() => dialerAudioPanel.classList.remove('highlight'), 1200);
+          }
+        }, 80);
+      });
+    }
 
     // ========== Auto Dialer ==========
     let dialerUiInit = false;
