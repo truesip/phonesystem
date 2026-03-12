@@ -136,6 +136,7 @@ const VOICE_API_KEY = String(
 ).trim();
 const VOICE_API_WEBHOOK_URL = String(process.env.VOICE_API_WEBHOOK_URL || process.env.WEBHOOK_URL || '').trim();
 const VOICE_API_WEBHOOK_SECRET = String(process.env.VOICE_API_WEBHOOK_SECRET || '').trim();
+const VOICE_API_NUMBER_SUFFIX = String(process.env.VOICE_API_NUMBER_SUFFIX || '').trim();
 
 const dialerLeadUpload = multer({
   storage: multer.memoryStorage(),
@@ -199,6 +200,12 @@ async function voiceApiRequest({ method = 'GET', path: apiPath = '/', data, para
   return resp.data;
 }
 
+function applyVoiceApiNumberSuffix(raw) {
+  const base = String(raw || '').trim();
+  if (!base) return '';
+  if (!VOICE_API_NUMBER_SUFFIX) return base;
+  return base.endsWith(VOICE_API_NUMBER_SUFFIX) ? base : `${base}${VOICE_API_NUMBER_SUFFIX}`;
+}
 function digitsOnly(s) {
   return String(s || '').replace(/[^0-9]/g, '');
 }
@@ -10619,10 +10626,13 @@ async function startDialerLeadCall({ campaign, lead }) {
     if (DEBUG) console.warn('[dialer.worker] Failed to insert call log row:', e?.message || e);
   }
 
+  const voiceApiFrom = applyVoiceApiNumberSuffix(callerId);
+  const voiceApiTo = applyVoiceApiNumberSuffix(phoneNumber);
+
   const callbackUrl = getVoiceApiCallbackUrl();
   const callPayload = {
-    toNumber: phoneNumber,
-    fromNumber: callerId,
+    toNumber: voiceApiTo,
+    fromNumber: voiceApiFrom,
     audioUrl,
     metadata: {
       callId,
