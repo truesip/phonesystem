@@ -4310,13 +4310,14 @@ function resolvePlaybackUriFromRow(row) {
 async function listDialerAudioRowsForUser(userId) {
   if (!pool || !userId) return [];
   try {
+    const limit = Number(DIALER_AUDIO_LIST_LIMIT) || 500;
     const [rows] = await pool.execute(
       `SELECT recording_name, playback_uri, metadata
        FROM dialer_audio_recordings
        WHERE user_id = ?
        ORDER BY created_at DESC
-       LIMIT ?`,
-      [userId, DIALER_AUDIO_LIST_LIMIT]
+       LIMIT ${limit}`,
+      [userId]
     );
     return Array.isArray(rows) ? rows : [];
   } catch (e) {
