@@ -131,23 +131,6 @@ const DIALER_OUTBOUND_RATE_PER_MIN = parseFloat(
 // If 1, dialer outbound calls are billed in whole-minute increments (rounded up).
 const DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE = String(process.env.DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE ?? '0') !== '0';
 
-// External audio + call service integration (per integration.txt: Base + API_KEY)
-const VOICE_API_BASE_URL = String(
-  process.env.VOICE_API_BASE_URL
-  || process.env.DIALER_AUDIO_API_BASE_URL
-  || ''
-).trim().replace(/\/$/, '');
-const VOICE_API_KEY = String(
-  process.env.VOICE_API_KEY
-  || process.env.DIALER_AUDIO_API_KEY
-  || process.env.API_KEY
-  || ''
-).trim();
-const VOICE_API_WEBHOOK_URL = String(process.env.VOICE_API_WEBHOOK_URL || process.env.WEBHOOK_URL || '').trim();
-const VOICE_API_WEBHOOK_SECRET = String(process.env.VOICE_API_WEBHOOK_SECRET || '').trim();
-const rawVoiceApiSuffix = process.env.VOICE_API_NUMBER_SUFFIX;
-const VOICE_API_NUMBER_SUFFIX = rawVoiceApiSuffix != null ? String(rawVoiceApiSuffix).trim() : '';
-const VOICE_API_AVAILABLE = Boolean(VOICE_API_BASE_URL && VOICE_API_KEY);
 
 const ARI_ENABLE = ['1', 'true', 'yes', 'on'].includes(String(process.env.ARI_ENABLE || '0').trim().toLowerCase());
 const ARI_HOST = String(process.env.ARI_HOST || '').trim();
@@ -159,14 +142,14 @@ const ARI_DIAL_PREFIX = String(process.env.ARI_DIAL_PREFIX || process.env.PJSIP_
 const ARI_CONNECT_RETRY_MS = Math.max(1000, parseInt(process.env.ARI_CONNECT_RETRY_MS || '3000', 10) || 3000);
 const ARI_PLAYBACK_HANGUP_DELAY_MS = Math.max(0, parseInt(process.env.ARI_PLAYBACK_HANGUP_DELAY_MS || '0', 10) || 0);
 const ARI_NUMBER_SUFFIX = (() => {
-  if (process.env.ARI_NUMBER_SUFFIX !== undefined) return String(process.env.ARI_NUMBER_SUFFIX).trim();
-  if (rawVoiceApiSuffix !== undefined) return VOICE_API_NUMBER_SUFFIX;
+  const raw = process.env.ARI_NUMBER_SUFFIX;
+  if (raw !== undefined) {
+    const trimmed = String(raw).trim();
+    return trimmed || '@switch';
+  }
   return '@switch';
 })();
 const ARI_IS_CONFIGURED = Boolean(ARI_ENABLE && AriClient && ARI_HOST && ARI_USER && ARI_PASSWORD);
-const DIALER_AUDIO_USE_LOCAL = String(
-  process.env.DIALER_AUDIO_USE_LOCAL ?? (ARI_IS_CONFIGURED ? '1' : '0')
-).trim().toLowerCase() !== '0';
 
 const dialerLeadUpload = multer({
   storage: multer.memoryStorage(),
@@ -197,38 +180,6 @@ function joinUrl(base, p) {
   if (s && !s.startsWith('/')) s = '/' + s;
   return b + s;
 }
-function getVoiceApiCallbackUrl() {
-  if (VOICE_API_WEBHOOK_URL) return VOICE_API_WEBHOOK_URL;
-  const base = String(process.env.PUBLIC_BASE_URL || process.env.PORTAL_BASE_URL || '').trim();
-  if (!base) return '';
-  return joinUrl(base, '/webhooks/voice/dialer');
-}
-
-function assertVoiceApiConfigured() {
-  if (!VOICE_API_BASE_URL || !VOICE_API_KEY) {
-    throw new Error('Voice API (base URL + API key) is not configured. Check integration.txt for required env vars.');
-  }
-}
-async function voiceApiRequest({ method = 'GET', path: apiPath = '/', data, params, headers = {}, responseType = 'json', timeout = 30000 }) {
-  assertVoiceApiConfigured();
-  const url = joinUrl(VOICE_API_BASE_URL, apiPath || '/');
-  const mergedHeaders = {
-    'x-api-key': VOICE_API_KEY,
-    ...headers,
-  };
-  const resp = await axios({
-    method,
-    url,
-    data,
-    params,
-    headers: mergedHeaders,
-    responseType,
-    timeout,
-    maxContentLength: 20 * 1024 * 1024,
-    maxBodyLength: 20 * 1024 * 1024,
-  });
-  return resp.data;
-}
 
 let ariClientInstance = null;
 let ariReady = false;
@@ -256,7 +207,7 @@ function isAriDialerReady() {
 async function emitAriDialerEvent(channelId, eventPayload) {
   if (!channelId) return;
   try {
-    await applyVoiceDialerEvent(
+    await applyDialerCallEvent(
       {
         callId: channelId,
         uuid: channelId,
@@ -433,10 +384,10 @@ if (ARI_IS_CONFIGURED) {
   console.warn('[ari] ARI_ENABLE=1 but host/user/password/app settings are incomplete; falling back to HTTP Voice API.');
 }
 
-function applyVoiceApiNumberSuffix(raw, overrideSuffix) {
+function applyDialerNumberSuffix(raw, overrideSuffix) {
   const base = String(raw || '').trim();
   if (!base) return '';
-  const suffix = overrideSuffix !== undefined ? String(overrideSuffix || '').trim() : VOICE_API_NUMBER_SUFFIX;
+  const suffix = overrideSuffix !== undefined ? String(overrideSuffix || '').trim() : ARI_NUMBER_SUFFIX;
   if (!suffix) return base;
   return base.endsWith(suffix) ? base : `${base}${suffix}`;
 }
@@ -4535,13 +4486,6 @@ function normalizeAudioRecordingName(raw) {
   return String(raw || '').trim();
 }
 
-function normalizeVoiceApiAudioList(payload) {
-  if (!payload) return [];
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload.data)) return payload.data;
-  if (Array.isArray(payload.recordings)) return payload.recordings;
-  return [];
-}
 
 function parseDialerAudioMetadata(row) {
   if (!row || row.metadata == null) return null;
@@ -4563,9 +4507,6 @@ function resolvePlaybackUriFromRow(row) {
   return '';
 }
 
-function isLocalDialerAudioEnabled() {
-  return DIALER_AUDIO_USE_LOCAL || (!VOICE_API_AVAILABLE && ARI_IS_CONFIGURED);
-}
 
 function buildPublicMediaUrl(fileName, req) {
   const safeName = encodeURIComponent(String(fileName || '').trim());
@@ -4735,61 +4676,23 @@ app.get('/api/me/dialer/audio', requireAuth, async (req, res) => {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     const userId = req.session.userId;
     const ownedRows = await listDialerAudioRowsForUser(userId);
-    if (!ownedRows.length) {
-      return res.json({ success: true, data: [] });
-    }
-
-    if (isLocalDialerAudioEnabled()) {
-      const data = [];
-      for (const row of ownedRows) {
-        const key = normalizeAudioRecordingName(row.recording_name);
-        if (!key) continue;
-        let playbackUri = resolvePlaybackUriFromRow(row);
-        if (!playbackUri) playbackUri = buildSoundPlaybackUri(key, req);
-        if (!playbackUri) continue;
-        const meta = parseDialerAudioMetadata(row) || {};
-        data.push({
-          recordingName: meta.recordingName || key,
-          playbackUri,
-          source: 'local',
-          uploadedAt: row.created_at || null
-        });
-      }
-      return res.json({ success: true, data });
-    }
-
-    let remoteItems = [];
-    try {
-      const remotePayload = await voiceApiRequest({ method: 'GET', path: '/api/audio' });
-      remoteItems = normalizeVoiceApiAudioList(remotePayload);
-    } catch (err) {
-      if (DEBUG) console.warn('[dialer.audio.list] Voice API fetch failed; falling back to cached rows:', err?.message || err);
-    }
-    const remoteByName = new Map();
-    for (const item of remoteItems || []) {
-      const key = normalizeAudioRecordingName(item?.recordingName || item?.recording_name || item?.name || item?.filename);
-      if (key) remoteByName.set(key, item);
-    }
-
     const data = [];
     for (const row of ownedRows) {
       const key = normalizeAudioRecordingName(row.recording_name);
       if (!key) continue;
-      const remote = remoteByName.get(key);
-      if (remote) {
-        data.push(remote);
-        continue;
+      let playbackUri = resolvePlaybackUriFromRow(row);
+      if (!playbackUri || playbackUri.startsWith('sound:')) {
+        playbackUri = buildSoundPlaybackUri(key, req);
       }
-      const meta = parseDialerAudioMetadata(row);
-      let fallback = { recordingName: key };
-      if (meta && typeof meta === 'object') {
-        fallback = { ...meta, recordingName: meta.recordingName || key };
-      }
-      const resolvedPlayback = fallback.playbackUri || fallback.playback_uri || resolvePlaybackUriFromRow(row);
-      if (resolvedPlayback) fallback.playbackUri = resolvedPlayback;
-      data.push(fallback);
+      if (!playbackUri) continue;
+      const meta = parseDialerAudioMetadata(row) || {};
+      data.push({
+        recordingName: meta.recordingName || key,
+        playbackUri,
+        source: 'local',
+        uploadedAt: row.created_at || null
+      });
     }
-
     return res.json({ success: true, data });
   } catch (e) {
     if (DEBUG) console.error('[dialer.audio.list] error:', e?.message || e);
@@ -4806,60 +4709,28 @@ app.post('/api/me/dialer/audio/upload', requireAuth, dialerAudioLibraryUpload.si
     if (!file || !file.buffer) {
       return res.status(400).json({ success: false, message: 'Missing audio file (field name: file)' });
     }
-    if (isLocalDialerAudioEnabled()) {
-      const converted = await convertBufferTo8kMonoWav(file.buffer);
-      const recordingName = generateLocalRecordingName(file.originalname || 'audio');
-      await saveLocalDialerAudioFile({
-        userId,
-        fileName: recordingName,
-        buffer: converted,
-        mimeType: 'audio/wav'
-      });
-      const playbackUri = buildSoundPlaybackUri(recordingName, req);
-      const payload = {
-        recordingName,
-        playbackUri,
-        mimeType: 'audio/wav',
-        source: 'local'
-      };
-      await upsertDialerAudioRecording({
-        userId,
-        recordingName,
-        playbackUri,
-        metadata: payload
-      });
-      return res.json({ success: true, data: payload });
-    }
-
-    const form = new FormData();
-    form.append('file', file.buffer, {
-      filename: file.originalname || 'audio.wav',
-      contentType: file.mimetype || 'audio/wav',
-      knownLength: file.size || file.buffer.length
+    const converted = await convertBufferTo8kMonoWav(file.buffer);
+    const recordingName = generateLocalRecordingName(file.originalname || 'audio');
+    await saveLocalDialerAudioFile({
+      userId,
+      fileName: recordingName,
+      buffer: converted,
+      mimeType: 'audio/wav'
     });
-    const data = await voiceApiRequest({
-      method: 'POST',
-      path: '/api/audio/upload',
-      data: form,
-      headers: form.getHeaders()
+    const playbackUri = buildSoundPlaybackUri(recordingName, req);
+    const payload = {
+      recordingName,
+      playbackUri,
+      mimeType: 'audio/wav',
+      source: 'local'
+    };
+    await upsertDialerAudioRecording({
+      userId,
+      recordingName,
+      playbackUri,
+      metadata: payload
     });
-
-    const recordingName = normalizeAudioRecordingName(
-      data?.recordingName || data?.recording_name || data?.name || data?.filename
-    );
-    const playbackUri = data?.playbackUri || data?.playback_uri || data?.uri || data?.url || null;
-    if (recordingName) {
-      await upsertDialerAudioRecording({
-        userId,
-        recordingName,
-        playbackUri,
-        metadata: data
-      });
-    } else if (DEBUG) {
-      console.warn('[dialer.audio.upload] Voice API response missing recordingName; ownership not recorded');
-    }
-
-    return res.json({ success: true, data });
+    return res.json({ success: true, data: payload });
   } catch (e) {
     if (DEBUG) console.error('[dialer.audio.upload] error:', e?.message || e);
     const status = e?.response?.status || 502;
@@ -4882,33 +4753,8 @@ app.delete('/api/me/dialer/audio/:name', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: 'Audio recording not found' });
     }
 
-    if (isLocalDialerAudioEnabled()) {
-      await deleteLocalDialerAudioFile({ userId, fileName: rawName });
-      try {
-        await pool.execute(
-          'DELETE FROM dialer_audio_recordings WHERE user_id = ? AND recording_name = ? LIMIT 1',
-          [userId, rawName]
-        );
-      } catch (err) {
-        if (DEBUG) console.warn('[dialer.audio.delete] Failed to delete ownership row:', err?.message || err);
-      }
-      return res.json({ success: true, data: { deleted: rawName, source: 'local' } });
-    }
 
-    let data = null;
-    try {
-      data = await voiceApiRequest({
-        method: 'DELETE',
-        path: `/api/audio/${encodeURIComponent(rawName)}`
-      });
-    } catch (err) {
-      const status = err?.response?.status || 0;
-      if (status && status !== 404) {
-        throw err;
-      }
-      data = { success: status !== 404 };
-    }
-
+    await deleteLocalDialerAudioFile({ userId, fileName: rawName });
     try {
       await pool.execute(
         'DELETE FROM dialer_audio_recordings WHERE user_id = ? AND recording_name = ? LIMIT 1',
@@ -4918,7 +4764,7 @@ app.delete('/api/me/dialer/audio/:name', requireAuth, async (req, res) => {
       if (DEBUG) console.warn('[dialer.audio.delete] Failed to prune ownership row:', err?.message || err);
     }
 
-    return res.json({ success: true, data });
+    return res.json({ success: true, data: { deleted: rawName, source: 'local' } });
   } catch (e) {
     if (DEBUG) console.error('[dialer.audio.delete] error:', e?.message || e);
     const status = e?.response?.status || 502;
@@ -11022,9 +10868,8 @@ async function startDialerLeadCall({ campaign, lead }) {
     call_id: callId,
     call_domain: callDomain,
     voice: {
-      provider: ARI_IS_CONFIGURED ? 'ari' : (VOICE_API_AVAILABLE ? 'voice_api' : null),
-      uuid: null,
-      jobId: null
+      provider: 'ari',
+      uuid: null
     }
   };
 
@@ -11046,21 +10891,8 @@ async function startDialerLeadCall({ campaign, lead }) {
     if (DEBUG) console.warn('[dialer.worker] Failed to insert call log row:', e?.message || e);
   }
 
-  const voiceApiFrom = callerId;
-  const ariDestination = applyVoiceApiNumberSuffix(phoneNumber, ARI_NUMBER_SUFFIX);
-  const voiceApiDestination = applyVoiceApiNumberSuffix(phoneNumber);
-  const callbackUrl = getVoiceApiCallbackUrl();
-  const callPayload = {
-    toNumber: voiceApiDestination,
-    fromNumber: voiceApiFrom,
-    audioUrl,
-    metadata: {
-      callId,
-      campaignId,
-      leadId
-    }
-  };
-  if (callbackUrl) callPayload.webhookUrl = callbackUrl;
+  const dialerFrom = callerId;
+  const ariDestination = applyDialerNumberSuffix(phoneNumber, ARI_NUMBER_SUFFIX);
 
   const markLeadFailed = async (message) => {
     try {
@@ -11077,89 +10909,41 @@ async function startDialerLeadCall({ campaign, lead }) {
     } catch {}
   };
 
-  let placed = false;
-  let outboundProvider = null;
-  let providerUuid = null;
-  let providerJobId = null;
-
-  if (isAriDialerReady()) {
-    try {
-      const ariResp = await originateAriCall({
-        toNumber: ariDestination,
-        fromNumber: voiceApiFrom,
-        audioUrl
-      });
-      providerUuid = ariResp?.channelId || null;
-      providerJobId = ariResp?.channelId || null;
-      outboundProvider = 'ari';
-      placed = true;
-    } catch (err) {
-      if (!VOICE_API_AVAILABLE) {
-        const msg = err?.message || 'Failed to start ARI outbound call';
-        if (DEBUG) console.warn('[dialer.worker] ARI originate failed:', msg);
-        await markLeadFailed(msg);
-        return { ok: false };
-      }
-      if (DEBUG) console.warn('[dialer.worker] ARI originate failed; falling back to Voice API:', err?.message || err);
-    }
-  }
-
-  if (!placed) {
-    if (!VOICE_API_AVAILABLE) {
-      await markLeadFailed('Voice API not configured');
-      return { ok: false };
-    }
-    try {
-      const voiceSubmitResponse = await voiceApiRequest({
-        method: 'POST',
-        path: '/call',
-        data: callPayload
-      });
-      providerUuid =
-        voiceSubmitResponse?.uuid
-        || voiceSubmitResponse?.callId
-        || voiceSubmitResponse?.call_id
-        || voiceSubmitResponse?.job
-        || voiceSubmitResponse?.jobId
-        || voiceSubmitResponse?.job_id
-        || null;
-      providerJobId =
-        voiceSubmitResponse?.jobId
-        || voiceSubmitResponse?.job_id
-        || voiceSubmitResponse?.job
-        || voiceSubmitResponse?.uuid
-        || null;
-      outboundProvider = 'voice_api';
-      placed = true;
-    } catch (e) {
-      const msg = e?.response?.data?.message || e?.message || 'Failed to start outbound call';
-      if (DEBUG) console.warn('[dialer.worker] outbound call failed:', msg);
-      await markLeadFailed(msg);
-      return { ok: false };
-    }
-  }
-
-  if (!placed) {
-    await markLeadFailed('Unable to start outbound call');
+  if (!isAriDialerReady()) {
+    await markLeadFailed('ARI not connected');
     return { ok: false };
   }
 
-  if (outboundProvider || providerUuid || providerJobId) {
+  let providerUuid = null;
+  try {
+    const ariResp = await originateAriCall({
+      toNumber: ariDestination,
+      fromNumber: dialerFrom,
+      audioUrl
+    });
+    providerUuid = ariResp?.channelId || null;
+  } catch (err) {
+    const msg = err?.message || 'Failed to start ARI outbound call';
+    if (DEBUG) console.warn('[dialer.worker] ARI originate failed:', msg);
+    await markLeadFailed(msg);
+    return { ok: false };
+  }
+
+  if (providerUuid) {
     try {
       await pool.execute(
         `UPDATE dialer_call_logs
            SET metadata = JSON_SET(
              COALESCE(metadata, '{}'),
-             '$.voice.provider', ?,
-             '$.voice.uuid', ?,
-             '$.voice.jobId', ?
+             '$.voice.provider', 'ari',
+             '$.voice.uuid', ?
            )
          WHERE call_id = ?
          LIMIT 1`,
-        [outboundProvider, providerUuid, providerJobId, callId]
+        [providerUuid, callId]
       );
     } catch (e) {
-      if (DEBUG) console.warn('[dialer.worker] Failed to store voice provider metadata:', e?.message || e);
+      if (DEBUG) console.warn('[dialer.worker] Failed to store ARI channel id:', e?.message || e);
     }
   }
 
@@ -18002,7 +17786,7 @@ async function buildCallerMemoryForDialin({ userId, agentId, fromDigits, exclude
   }
 }
 
-async function applyVoiceDialerEvent(rawBody, { source = 'webhook' } = {}) {
+async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
   if (!pool) throw new Error('Database not configured');
 
   const body = (rawBody && typeof rawBody === 'object') ? rawBody : {};
@@ -18063,11 +17847,11 @@ async function applyVoiceDialerEvent(rawBody, { source = 'webhook' } = {}) {
   let metadataJson = callRow.metadata;
   try {
     const current = metadataJson ? JSON.parse(metadataJson) : {};
-    current.voiceWebhook = body;
-    current.voiceWebhookSource = source;
+    current.ariEvent = body;
+    current.ariEventSource = source;
     metadataJson = JSON.stringify(current);
   } catch {
-    metadataJson = JSON.stringify({ voiceWebhook: body, voiceWebhookSource: source });
+    metadataJson = JSON.stringify({ ariEvent: body, ariEventSource: source });
   }
 
   const normalizedStatus = statusRaw || eventRaw;
@@ -18126,49 +17910,11 @@ async function applyVoiceDialerEvent(rawBody, { source = 'webhook' } = {}) {
   }
 
   try {
-    requestDialerWorkerTick({ reason: `voice-event:${source}`, immediate: true });
+    requestDialerWorkerTick({ reason: `ari-event:${source}`, immediate: true });
   } catch {}
 
   return { status: 200, success: true, callId: storedCallId, campaignId, leadId };
 }
-
-app.post('/webhooks/voice/dialer', async (req, res) => {
-  try {
-    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
-    if (VOICE_API_WEBHOOK_SECRET) {
-      const querySecretRaw =
-        req.query?.token ??
-        req.query?.secret ??
-        req.query?.key ??
-        req.query?.auth ??
-        req.query?.apiKey ??
-        '';
-      const querySecret = Array.isArray(querySecretRaw) ? querySecretRaw[0] : querySecretRaw;
-      const provided = String(
-        req.headers['x-api-key']
-        || req.headers['x-webhook-secret']
-        || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-        || querySecret
-        || ''
-      ).trim();
-      if (!provided || provided !== VOICE_API_WEBHOOK_SECRET) {
-        return res.status(401).json({ success: false, message: 'Invalid webhook secret' });
-      }
-    }
-
-    const result = await applyVoiceDialerEvent(req.body, { source: 'webhook' });
-    if (result.status === 400) {
-      return res.status(400).json({ success: false, message: result.error || 'callId is required' });
-    }
-    if (result.status === 202) {
-      return res.status(202).json({ success: true, ignored: true });
-    }
-    return res.json({ success: true });
-  } catch (e) {
-    if (DEBUG) console.error('[voice.webhook] error', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Webhook processing failed' });
-  }
-});
 // Daily pinless dial-in webhook (room_creation_api) -> start Pipecat Cloud session.
 // This lets us log inbound AI calls into the user's Call History.
 app.post('/webhooks/daily/dialin/:agentName', async (req, res) => {
