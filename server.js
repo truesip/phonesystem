@@ -107,6 +107,7 @@ const DIALER_WORKER_DB_LOCK_WAIT_SECONDS = Math.max(0, parseInt(process.env.DIAL
 const DIALER_GLOBAL_MAX_DIALOUT = Math.max(0, parseInt(process.env.DIALER_GLOBAL_MAX_DIALOUT || '0', 10) || 0);
 // Minimum credit required to run Auto Dialer campaigns. Defaults to 0 (pause when balance goes negative).
 const DIALER_MIN_CREDIT = parseFloat(process.env.DIALER_MIN_CREDIT || '0') || 0;
+const DIALER_AUDIO_LIST_LIMIT = Math.max(50, Math.min(500, parseInt(process.env.DIALER_AUDIO_LIST_LIMIT || '500', 10) || 500));
 
 function clampDialerConcurrencyLimit(raw) {
   const n = parseInt(String(raw ?? ''), 10);
@@ -2431,6 +2432,33 @@ async function initDb() {
     CONSTRAINT fk_dialer_logs_agent FOREIGN KEY (ai_agent_id) REFERENCES ai_agents(id) ON DELETE SET NULL
   )`);
 
+  await pool.query(`CREATE TABLE IF NOT EXISTS dialer_audio_recordings (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    recording_name VARCHAR(191) NOT NULL,
+    playback_uri VARCHAR(512) NULL,
+    metadata JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_dialer_audio_user_recording (user_id, recording_name),
+    KEY idx_dialer_audio_recordings_name (recording_name),
+    CONSTRAINT fk_dialer_audio_recordings_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  await ensureBigintPK('dialer_audio_recordings');
+
+  try {
+    await pool.query(`
+      INSERT IGNORE INTO dialer_audio_recordings (user_id, recording_name, playback_uri, metadata)
+      SELECT DISTINCT user_id, audio_recording_name, audio_playback_uri, NULL
+      FROM dialer_campaigns
+      WHERE audio_recording_name IS NOT NULL AND audio_recording_name <> ''
+    `);
+    if (DEBUG) console.log('[schema] Backfilled dialer_audio_recordings from dialer_campaigns');
+  } catch (e) {
+    if (DEBUG) console.warn('[schema] dialer_audio_recordings backfill failed:', e.message || e);
+  }
+
   // Ensure dialer_call_logs columns exist (price/billing markers + Pipecat session tracking)
   for (const col of [
     { name: 'price', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN price DECIMAL(18,8) NULL' },
@@ -4247,9 +4275,136 @@ app.post('/login', loginLimiter, async (req, res) => {
   }
 });
 
+function normalizeAudioRecordingName(raw) {
+  return String(raw || '').trim();
+}
+
+function normalizeVoiceApiAudioList(payload) {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.data)) return payload.data;
+  if (Array.isArray(payload.recordings)) return payload.recordings;
+  return [];
+}
+
+function parseDialerAudioMetadata(row) {
+  if (!row || row.metadata == null) return null;
+  if (typeof row.metadata === 'object') return row.metadata;
+  try {
+    return JSON.parse(row.metadata);
+  } catch {
+    return null;
+  }
+}
+
+function resolvePlaybackUriFromRow(row) {
+  if (!row) return '';
+  if (row.playback_uri) return row.playback_uri;
+  const meta = parseDialerAudioMetadata(row);
+  if (meta && typeof meta === 'object') {
+    return meta.playbackUri || meta.playback_uri || meta.uri || meta.url || '';
+  }
+  return '';
+}
+
+async function listDialerAudioRowsForUser(userId) {
+  if (!pool || !userId) return [];
+  try {
+    const [rows] = await pool.execute(
+      `SELECT recording_name, playback_uri, metadata
+       FROM dialer_audio_recordings
+       WHERE user_id = ?
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [userId, DIALER_AUDIO_LIST_LIMIT]
+    );
+    return Array.isArray(rows) ? rows : [];
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.audio] Failed to list user recordings:', e?.message || e);
+    return [];
+  }
+}
+
+async function upsertDialerAudioRecording({ userId, recordingName, playbackUri, metadata }) {
+  if (!pool || !userId || !recordingName) return;
+  let metadataJson = null;
+  if (metadata) {
+    try {
+      metadataJson = JSON.stringify(metadata);
+    } catch {
+      metadataJson = null;
+    }
+  }
+  try {
+    await pool.execute(
+      `INSERT INTO dialer_audio_recordings (user_id, recording_name, playback_uri, metadata)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE playback_uri = VALUES(playback_uri), metadata = VALUES(metadata), updated_at = CURRENT_TIMESTAMP`,
+      [userId, recordingName, playbackUri || null, metadataJson]
+    );
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.audio] Failed to upsert ownership record:', e?.message || e);
+  }
+}
+
+async function getDialerAudioRecordingForUser({ userId, recordingName }) {
+  if (!pool || !userId || !recordingName) return null;
+  try {
+    const [rows] = await pool.execute(
+      `SELECT recording_name, playback_uri, metadata
+       FROM dialer_audio_recordings
+       WHERE user_id = ? AND recording_name = ?
+       LIMIT 1`,
+      [userId, recordingName]
+    );
+    return rows && rows[0] ? rows[0] : null;
+  } catch (e) {
+    if (DEBUG) console.warn('[dialer.audio] Failed to fetch ownership row:', e?.message || e);
+    return null;
+  }
+}
+
 app.get('/api/me/dialer/audio', requireAuth, async (req, res) => {
   try {
-    const data = await voiceApiRequest({ method: 'GET', path: '/api/audio' });
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const ownedRows = await listDialerAudioRowsForUser(userId);
+    if (!ownedRows.length) {
+      return res.json({ success: true, data: [] });
+    }
+
+    let remoteItems = [];
+    try {
+      const remotePayload = await voiceApiRequest({ method: 'GET', path: '/api/audio' });
+      remoteItems = normalizeVoiceApiAudioList(remotePayload);
+    } catch (err) {
+      if (DEBUG) console.warn('[dialer.audio.list] Voice API fetch failed; falling back to cached rows:', err?.message || err);
+    }
+    const remoteByName = new Map();
+    for (const item of remoteItems || []) {
+      const key = normalizeAudioRecordingName(item?.recordingName || item?.recording_name || item?.name || item?.filename);
+      if (key) remoteByName.set(key, item);
+    }
+
+    const data = [];
+    for (const row of ownedRows) {
+      const key = normalizeAudioRecordingName(row.recording_name);
+      if (!key) continue;
+      const remote = remoteByName.get(key);
+      if (remote) {
+        data.push(remote);
+        continue;
+      }
+      const meta = parseDialerAudioMetadata(row);
+      let fallback = { recordingName: key };
+      if (meta && typeof meta === 'object') {
+        fallback = { ...meta, recordingName: meta.recordingName || key };
+      }
+      const resolvedPlayback = fallback.playbackUri || fallback.playback_uri || resolvePlaybackUriFromRow(row);
+      if (resolvedPlayback) fallback.playbackUri = resolvedPlayback;
+      data.push(fallback);
+    }
+
     return res.json({ success: true, data });
   } catch (e) {
     if (DEBUG) console.error('[dialer.audio.list] error:', e?.message || e);
@@ -4260,6 +4415,8 @@ app.get('/api/me/dialer/audio', requireAuth, async (req, res) => {
 
 app.post('/api/me/dialer/audio/upload', requireAuth, dialerAudioLibraryUpload.single('file'), async (req, res) => {
   try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
     const file = req.file;
     if (!file || !file.buffer) {
       return res.status(400).json({ success: false, message: 'Missing audio file (field name: file)' });
@@ -4276,6 +4433,22 @@ app.post('/api/me/dialer/audio/upload', requireAuth, dialerAudioLibraryUpload.si
       data: form,
       headers: form.getHeaders()
     });
+
+    const recordingName = normalizeAudioRecordingName(
+      data?.recordingName || data?.recording_name || data?.name || data?.filename
+    );
+    const playbackUri = data?.playbackUri || data?.playback_uri || data?.uri || data?.url || null;
+    if (recordingName) {
+      await upsertDialerAudioRecording({
+        userId,
+        recordingName,
+        playbackUri,
+        metadata: data
+      });
+    } else if (DEBUG) {
+      console.warn('[dialer.audio.upload] Voice API response missing recordingName; ownership not recorded');
+    }
+
     return res.json({ success: true, data });
   } catch (e) {
     if (DEBUG) console.error('[dialer.audio.upload] error:', e?.message || e);
@@ -4287,14 +4460,41 @@ app.post('/api/me/dialer/audio/upload', requireAuth, dialerAudioLibraryUpload.si
 
 app.delete('/api/me/dialer/audio/:name', requireAuth, async (req, res) => {
   try {
-    const rawName = String(req.params.name || '').trim();
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const rawName = normalizeAudioRecordingName(req.params.name || '');
     if (!rawName) {
       return res.status(400).json({ success: false, message: 'Recording name is required' });
     }
-    const data = await voiceApiRequest({
-      method: 'DELETE',
-      path: `/api/audio/${encodeURIComponent(rawName)}`
-    });
+
+    const owned = await getDialerAudioRecordingForUser({ userId, recordingName: rawName });
+    if (!owned) {
+      return res.status(404).json({ success: false, message: 'Audio recording not found' });
+    }
+
+    let data = null;
+    try {
+      data = await voiceApiRequest({
+        method: 'DELETE',
+        path: `/api/audio/${encodeURIComponent(rawName)}`
+      });
+    } catch (err) {
+      const status = err?.response?.status || 0;
+      if (status && status !== 404) {
+        throw err;
+      }
+      data = { success: status !== 404 };
+    }
+
+    try {
+      await pool.execute(
+        'DELETE FROM dialer_audio_recordings WHERE user_id = ? AND recording_name = ? LIMIT 1',
+        [userId, rawName]
+      );
+    } catch (err) {
+      if (DEBUG) console.warn('[dialer.audio.delete] Failed to prune ownership row:', err?.message || err);
+    }
+
     return res.json({ success: true, data });
   } catch (e) {
     if (DEBUG) console.error('[dialer.audio.delete] error:', e?.message || e);
@@ -9839,13 +10039,22 @@ app.post('/api/me/dialer/campaigns', requireAuth, async (req, res) => {
     const name = String(req.body?.name || '').trim().slice(0, 191);
     const callerIdRaw = String(req.body?.caller_id || req.body?.callerId || '').trim();
     const audioRecordingName = String(req.body?.audio_recording_name || req.body?.audioRecordingName || '').trim().slice(0, 191);
-    const audioPlaybackUri = String(req.body?.audio_playback_uri || req.body?.audioPlaybackUri || '').trim().slice(0, 255);
+    const audioPlaybackUriInput = String(req.body?.audio_playback_uri || req.body?.audioPlaybackUri || '').trim().slice(0, 255);
     const concurrencyRaw = parseInt(req.body?.concurrency_limit ?? req.body?.concurrencyLimit ?? 1, 10);
     
     if (!name) return res.status(400).json({ success: false, message: 'Campaign name is required' });
     const callerId = normalizeDialerCallerId(callerIdRaw);
     if (!callerId) return res.status(400).json({ success: false, message: 'Caller ID is invalid. Use E.164 like +15551234567 or a SIP URI.' });
-    if (!audioPlaybackUri) return res.status(400).json({ success: false, message: 'Select an audio recording for this campaign' });
+    const audioRecordRow = audioRecordingName
+      ? await getDialerAudioRecordingForUser({ userId, recordingName: audioRecordingName })
+      : null;
+    if (!audioRecordRow) {
+      return res.status(400).json({ success: false, message: 'Select an audio recording for this campaign' });
+    }
+    const audioPlaybackUri = resolvePlaybackUriFromRow(audioRecordRow) || audioPlaybackUriInput;
+    if (!audioPlaybackUri) {
+      return res.status(400).json({ success: false, message: 'Selected audio recording is missing a playback URL. Please re-upload the file.' });
+    }
 
     const concurrency = clampDialerConcurrencyLimit(concurrencyRaw);
 
