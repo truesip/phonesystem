@@ -14792,11 +14792,14 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
 
     const [dialerRows] = await pool.query(
       `SELECT l.id, l.call_id, l.duration_sec, l.price, l.status, l.result, l.created_at,
+              l.metadata,
               d.phone_number AS to_number,
-              n.phone_number AS from_number
+              n.phone_number AS from_number,
+              c.caller_id AS campaign_caller_id
        FROM dialer_call_logs l
        LEFT JOIN dialer_leads d ON d.id = l.lead_id
        LEFT JOIN ai_numbers n ON n.agent_id = l.ai_agent_id AND n.user_id = l.user_id
+       LEFT JOIN dialer_campaigns c ON c.id = d.campaign_id
        ${whereDialerSql}
        ORDER BY l.created_at DESC, l.id DESC`,
       dialerParams
@@ -14818,12 +14821,21 @@ async function loadUserCdrTimeline({ userId, page, pageSize, fromRaw, toRaw, did
         }
       } catch {}
       const durVal = (r.duration_sec != null ? Number(r.duration_sec) : null);
+      let fromNumber = r.from_number || r.campaign_caller_id || '';
+      if (!fromNumber && r.metadata) {
+        try {
+          const meta = JSON.parse(r.metadata);
+          if (meta && typeof meta === 'object') {
+            fromNumber = meta.caller_id || meta.callerId || meta.from || fromNumber;
+          }
+        } catch {}
+      }
       return {
         id: `dialer-${r.id}`,
         cdrId: r.call_id ? `dialer-${r.call_id}` : null,
-        didNumber: r.from_number || null,
+        didNumber: fromNumber || null,
         direction: 'outbound',
-        srcNumber: r.from_number || '',
+        srcNumber: fromNumber || '',
         dstNumber: r.to_number || '',
         timeStart,
         timeConnect: timeStart,
