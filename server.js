@@ -10605,7 +10605,11 @@ async function startDialerLeadCall({ campaign, lead }) {
     caller_id: callerId,
     audio_url: audioUrl,
     call_id: callId,
-    call_domain: callDomain
+    call_domain: callDomain,
+    voice: {
+      uuid: null,
+      jobId: null
+    }
   };
 
   try {
@@ -10630,6 +10634,7 @@ async function startDialerLeadCall({ campaign, lead }) {
   const voiceApiTo = applyVoiceApiNumberSuffix(phoneNumber);
 
   const callbackUrl = getVoiceApiCallbackUrl();
+  let voiceSubmitResponse = null;
   const callPayload = {
     toNumber: voiceApiTo,
     fromNumber: voiceApiFrom,
@@ -10643,11 +10648,31 @@ async function startDialerLeadCall({ campaign, lead }) {
   if (callbackUrl) callPayload.webhookUrl = callbackUrl;
 
   try {
-    await voiceApiRequest({
+    voiceSubmitResponse = await voiceApiRequest({
       method: 'POST',
       path: '/call',
       data: callPayload
     });
+
+    const voiceUuid = voiceSubmitResponse?.uuid || voiceSubmitResponse?.callId || voiceSubmitResponse?.call_id || null;
+    const voiceJobId = voiceSubmitResponse?.jobId || voiceSubmitResponse?.job_id || null;
+    if (voiceUuid || voiceJobId) {
+      try {
+        await pool.execute(
+          `UPDATE dialer_call_logs
+             SET metadata = JSON_SET(
+               COALESCE(metadata, '{}'),
+               '$.voice.uuid', ?,
+               '$.voice.jobId', ?
+             )
+           WHERE call_id = ?
+           LIMIT 1`,
+          [voiceUuid, voiceJobId, callId]
+        );
+      } catch (e) {
+        if (DEBUG) console.warn('[dialer.worker] Failed to store voice UUID/jobId:', e?.message || e);
+      }
+    }
 
     try {
       await pool.execute(
@@ -17518,7 +17543,7 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
     }
 
     const body = (req.body && typeof req.body === 'object') ? req.body : {};
-    const callId = String(
+    let callId = String(
       body.callId
       || body.call_id
       || body.uuid
@@ -17530,19 +17555,37 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
       return res.status(400).json({ success: false, message: 'callId is required' });
     }
 
-    const parsedIds = parseDialerCallIdentifier(callId);
+    const parsedIds = parseDialerCallIdentifier(storedCallId);
     const payloadCampaignId = Number(body.campaignId ?? body.metadata?.campaignId) || null;
     const payloadLeadId = Number(body.leadId ?? body.metadata?.leadId) || null;
 
     const [rows] = await pool.execute(
-      'SELECT id, campaign_id, lead_id, user_id, metadata FROM dialer_call_logs WHERE call_id = ? LIMIT 1',
+      'SELECT id, campaign_id, lead_id, user_id, metadata, call_id FROM dialer_call_logs WHERE call_id = ? LIMIT 1',
       [callId]
     );
-    const callRow = rows && rows[0] ? rows[0] : null;
+    let callRow = rows && rows[0] ? rows[0] : null;
+    if (!callRow && callId) {
+      try {
+        const [altRows] = await pool.execute(
+          `SELECT id, campaign_id, lead_id, user_id, metadata, call_id
+           FROM dialer_call_logs
+           WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.voice.uuid')) = ?
+              OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.voice.jobId')) = ?
+           ORDER BY id DESC
+           LIMIT 1`,
+          [callId, callId]
+        );
+        callRow = altRows && altRows[0] ? altRows[0] : null;
+      } catch (e) {
+        if (DEBUG) console.warn('[voice.webhook] fallback lookup failed:', e?.message || e);
+      }
+    }
     if (!callRow) {
-      if (DEBUG) console.warn('[voice.webhook] call_id not found', callId);
+      if (DEBUG) console.warn('[voice.webhook] call identifier not found', callId);
       return res.status(202).json({ success: true, ignored: true });
     }
+    const callRowId = Number(callRow.id);
+    const storedCallId = callRow.call_id || callId;
 
     const campaignId = payloadCampaignId ?? (Number(callRow.campaign_id) || parsedIds.campaignId);
     const leadId = payloadLeadId ?? (Number(callRow.lead_id) || parsedIds.leadId);
@@ -17581,9 +17624,9 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
              price = COALESCE(?, price),
              metadata = ?,
              updated_at = NOW()
-       WHERE call_id = ?
+       WHERE id = ?
        LIMIT 1`,
-      [callStatus, callResult || null, durationValue, priceValue, metadataJson, callId]
+      [callStatus, callResult || null, durationValue, priceValue, metadataJson, callRowId]
     );
 
     let leadStatus = null;
