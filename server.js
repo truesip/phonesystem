@@ -17518,7 +17518,14 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
     }
 
     const body = (req.body && typeof req.body === 'object') ? req.body : {};
-    const callId = String(body.callId || body.call_id || body.metadata?.callId || '').trim();
+    const callId = String(
+      body.callId
+      || body.call_id
+      || body.uuid
+      || body.metadata?.callId
+      || body.metadata?.uuid
+      || ''
+    ).trim();
     if (!callId) {
       return res.status(400).json({ success: false, message: 'callId is required' });
     }
