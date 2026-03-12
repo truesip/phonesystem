@@ -207,9 +207,12 @@ function isAriDialerReady() {
 async function emitAriDialerEvent(channelId, eventPayload) {
   if (!channelId) return;
   try {
+    const state = getAriCallState(channelId);
+    const dialerCallId = state?.dialerCallId;
     await applyDialerCallEvent(
       {
-        callId: channelId,
+        callId: dialerCallId || channelId,
+        channelId,
         uuid: channelId,
         ...eventPayload,
         provider: 'ari',
@@ -234,6 +237,11 @@ function popAriCallState(channelId) {
   const cached = ariCallCache.get(channelId) || {};
   ariCallCache.delete(channelId);
   return cached;
+}
+
+function getAriCallState(channelId) {
+  if (!channelId) return null;
+  return ariCallCache.get(channelId) || null;
 }
 
 function connectAriClient() {
