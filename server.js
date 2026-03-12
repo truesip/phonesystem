@@ -17541,6 +17541,7 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
     const leadId = payloadLeadId ?? (Number(callRow.lead_id) || parsedIds.leadId);
 
     const statusRaw = String(body.status || body.callStatus || '').trim().toLowerCase();
+    const eventRaw = String(body.event || '').trim().toLowerCase();
     const resultRaw = String(body.result || body.outcome || '').trim().toLowerCase();
     const durationSecRaw = Number(body.durationSec ?? body.duration_sec ?? body.duration ?? body.billsec ?? null);
     const priceRaw = body.price ?? body.cost ?? null;
@@ -17554,8 +17555,15 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
       metadataJson = JSON.stringify({ voiceWebhook: body });
     }
 
-    const callStatus = statusRaw || (resultRaw ? `result:${resultRaw}` : 'completed');
-    const callResult = resultRaw || null;
+    const normalizedStatus = statusRaw || eventRaw;
+    const callResultPrimary = resultRaw || null;
+    let callResult = callResultPrimary;
+    if (!callResult) {
+      if (eventRaw === 'answered') callResult = 'answered';
+      else if (eventRaw === 'hangup') callResult = 'hangup';
+      else if (eventRaw === 'ringing') callResult = 'ringing';
+    }
+    const callStatus = normalizedStatus || (callResult ? `result:${callResult}` : 'completed');
     const durationValue = Number.isFinite(durationSecRaw) ? durationSecRaw : null;
     const priceValue = priceRaw != null && Number.isFinite(Number(priceRaw)) ? Number(priceRaw) : null;
 
@@ -17572,15 +17580,25 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
     );
 
     let leadStatus = null;
-    if (statusRaw === 'submitted' || statusRaw === 'dialing' || statusRaw === 'in-progress') {
+    const statusForLead = normalizedStatus || callResult || '';
+    if (['submitted', 'dialing', 'in-progress', 'ringing'].includes(statusForLead)) {
       leadStatus = 'dialing';
-    } else if (statusRaw === 'failed' || callResult === 'failed') {
+    } else if (statusForLead === 'failed' || callResult === 'failed') {
       leadStatus = 'failed';
+    } else if (statusForLead === 'hangup') {
+      if (callResult === 'failed') leadStatus = 'failed';
+      else if (callResult === 'voicemail') leadStatus = 'voicemail';
+      else if (callResult === 'transferred') leadStatus = 'transferred';
+      else leadStatus = 'completed';
     } else if (callResult === 'voicemail') {
       leadStatus = 'voicemail';
     } else if (callResult === 'transferred') {
       leadStatus = 'transferred';
-    } else if (callResult === 'answered' || statusRaw === 'completed' || statusRaw === 'finished') {
+    } else if (
+      statusForLead === 'answered' ||
+      statusForLead === 'completed' ||
+      statusForLead === 'finished'
+    ) {
       leadStatus = 'completed';
     }
 
