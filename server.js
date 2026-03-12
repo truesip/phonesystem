@@ -18120,7 +18120,7 @@ async function applyVoiceDialerEvent(rawBody, { source = 'webhook' } = {}) {
   if (leadStatus && leadId) {
     await pool.execute(
       `UPDATE dialer_leads
-         SET status = ?, last_call_at = NOW(), updated_at = NOW()
+         SET status = ?, last_call_at = NOW()
        WHERE id = ? LIMIT 1`,
       [leadStatus, leadId]
     );
