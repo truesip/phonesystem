@@ -294,6 +294,18 @@ function registerAriEventHandlers(client) {
     const channelId = event?.channel?.id;
     if (!channelId) return;
     const now = new Date();
+    const cached = trackAriCallState(channelId, 'answer', now) || {};
+    if (!cached.answeredEventEmitted) {
+      cached.answeredEventEmitted = true;
+      ariCallCache.set(channelId, cached);
+      await emitAriDialerEvent(channelId, {
+        event: 'answered',
+        status: 'answered',
+        ringTime: cached?.ring ? cached.ring.toISOString() : null,
+        answerTime: now.toISOString(),
+        timestamp: now.toISOString(),
+      });
+    }
     trackAriCallState(channelId, 'stasisStart', now);
 
     const audio = (event?.args && event.args[0]) || event?.channel?.variables?.audio_url || '';
