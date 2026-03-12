@@ -10626,7 +10626,7 @@ async function startDialerLeadCall({ campaign, lead }) {
     if (DEBUG) console.warn('[dialer.worker] Failed to insert call log row:', e?.message || e);
   }
 
-  const voiceApiFrom = applyVoiceApiNumberSuffix(callerId);
+  const voiceApiFrom = callerId;
   const voiceApiTo = applyVoiceApiNumberSuffix(phoneNumber);
 
   const callbackUrl = getVoiceApiCallbackUrl();
