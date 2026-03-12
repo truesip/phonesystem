@@ -17566,8 +17566,8 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
     if (!callId) {
       return res.status(400).json({ success: false, message: 'callId is required' });
     }
-
-    const parsedIds = parseDialerCallIdentifier(storedCallId);
+    let storedCallId = callId;
+    let parsedIds = parseDialerCallIdentifier(storedCallId);
     const payloadCampaignId = Number(body.campaignId ?? body.metadata?.campaignId) || null;
     const payloadLeadId = Number(body.leadId ?? body.metadata?.leadId) || null;
 
@@ -17597,7 +17597,8 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
       return res.status(202).json({ success: true, ignored: true });
     }
     const callRowId = Number(callRow.id);
-    const storedCallId = callRow.call_id || callId;
+    storedCallId = String(callRow.call_id || storedCallId || callId || '').trim();
+    parsedIds = parseDialerCallIdentifier(storedCallId);
 
     const campaignId = payloadCampaignId ?? (Number(callRow.campaign_id) || parsedIds.campaignId);
     const leadId = payloadLeadId ?? (Number(callRow.lead_id) || parsedIds.leadId);
