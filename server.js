@@ -17497,10 +17497,19 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
     if (VOICE_API_WEBHOOK_SECRET) {
+      const querySecretRaw =
+        req.query?.token ??
+        req.query?.secret ??
+        req.query?.key ??
+        req.query?.auth ??
+        req.query?.apiKey ??
+        '';
+      const querySecret = Array.isArray(querySecretRaw) ? querySecretRaw[0] : querySecretRaw;
       const provided = String(
         req.headers['x-api-key']
         || req.headers['x-webhook-secret']
         || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+        || querySecret
         || ''
       ).trim();
       if (!provided || provided !== VOICE_API_WEBHOOK_SECRET) {
