@@ -150,6 +150,11 @@ const ARI_NUMBER_SUFFIX = (() => {
   return '@switch';
 })();
 const ARI_IS_CONFIGURED = Boolean(ARI_ENABLE && AriClient && ARI_HOST && ARI_USER && ARI_PASSWORD);
+const ARI_CHANNEL_POLL_INTERVAL_MS = Math.max(
+  0,
+  parseInt(process.env.ARI_CHANNEL_POLL_INTERVAL_MS || '1000', 10) || 0
+);
+const ARI_CHANNEL_POLL_HANGUP_GRACE_MS = Math.max(ARI_CHANNEL_POLL_INTERVAL_MS * 2, 2000);
 
 const dialerLeadUpload = multer({
   storage: multer.memoryStorage(),
@@ -185,6 +190,10 @@ let ariClientInstance = null;
 let ariReady = false;
 let ariReconnectTimer = null;
 const ariCallCache = new Map();
+let ariChannelPollTimer = null;
+let ariChannelPollRunning = false;
+const ariPollerKnownChannels = new Map();
+let ariChannelPollLastSnapshot = { updatedAt: null, status: 'idle', calls: [] };
 
 function scheduleAriReconnect(reason) {
   if (!ARI_IS_CONFIGURED) return;
@@ -244,6 +253,237 @@ function getAriCallState(channelId) {
   return ariCallCache.get(channelId) || null;
 }
 
+function startAriChannelPoller() {
+  if (!ARI_CHANNEL_POLL_INTERVAL_MS || ARI_CHANNEL_POLL_INTERVAL_MS <= 0) return;
+  if (ariChannelPollTimer || !isAriDialerReady()) return;
+  if (DEBUG) console.log(`[ari.poller] starting (interval=${ARI_CHANNEL_POLL_INTERVAL_MS}ms)`);
+  const tick = () => {
+    runAriChannelPollTick().catch((err) => {
+      if (DEBUG) console.warn('[ari.poller] tick failed:', err?.message || err);
+    });
+  };
+  ariChannelPollTimer = setInterval(tick, ARI_CHANNEL_POLL_INTERVAL_MS);
+  tick();
+}
+
+function stopAriChannelPoller(status = 'paused') {
+  if (ariChannelPollTimer) {
+    try { clearInterval(ariChannelPollTimer); } catch {}
+    ariChannelPollTimer = null;
+  }
+  ariChannelPollRunning = false;
+  ariPollerKnownChannels.clear();
+  ariChannelPollLastSnapshot = {
+    updatedAt: new Date().toISOString(),
+    status,
+    calls: []
+  };
+}
+
+function normalizeAriChannelState(raw) {
+  const value = String(raw || '').toLowerCase();
+  switch (value) {
+    case 'ring':
+    case 'ringing':
+      return 'ringing';
+    case 'dial':
+    case 'dialing':
+      return 'dialing';
+    case 'up':
+    case 'connected':
+      return 'answered';
+    case 'busy':
+      return 'busy';
+    case 'congestion':
+    case 'failed':
+      return 'failed';
+    case 'hangup':
+    case 'down':
+    case 'terminated':
+      return 'hangup';
+    default:
+      return value || 'unknown';
+  }
+}
+
+async function ensureDialerCallMetadataForChannel(channelId) {
+  if (!channelId || !pool) return null;
+  const cached = getAriCallState(channelId);
+  if (cached?.dialerCallId) {
+    return {
+      callId: cached.dialerCallId,
+      campaignId: cached.campaignId || null,
+      leadId: cached.leadId || null,
+      userId: cached.userId || null
+    };
+  }
+  try {
+    const [rows] = await pool.execute(
+      `SELECT call_id, campaign_id, lead_id, user_id
+         FROM dialer_call_logs
+        WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.voice.uuid')) = ?
+        ORDER BY id DESC
+        LIMIT 1`,
+      [channelId]
+    );
+    const row = rows && rows[0] ? rows[0] : null;
+    if (row) {
+      trackAriCallState(channelId, 'dialerCallId', row.call_id || null);
+      trackAriCallState(channelId, 'campaignId', Number(row.campaign_id) || null);
+      trackAriCallState(channelId, 'leadId', Number(row.lead_id) || null);
+      trackAriCallState(channelId, 'userId', Number(row.user_id) || null);
+      return {
+        callId: row.call_id || null,
+        campaignId: Number(row.campaign_id) || null,
+        leadId: Number(row.lead_id) || null,
+        userId: Number(row.user_id) || null
+      };
+    }
+  } catch (err) {
+    if (DEBUG) console.warn('[ari.poller] lookup failed:', err?.message || err);
+  }
+  return null;
+}
+
+async function runAriChannelPollTick() {
+  if (ariChannelPollRunning) return;
+  if (!isAriDialerReady() || !ariClientInstance || !ariClientInstance.channels?.list) {
+    ariChannelPollLastSnapshot = {
+      updatedAt: new Date().toISOString(),
+      status: 'disconnected',
+      calls: []
+    };
+    return;
+  }
+  ariChannelPollRunning = true;
+  try {
+    const now = new Date();
+    let channels = [];
+    try {
+      channels = await ariClientInstance.channels.list();
+    } catch (err) {
+      if (DEBUG) console.warn('[ari.poller] list error:', err?.message || err);
+      ariChannelPollLastSnapshot = {
+        updatedAt: now.toISOString(),
+        status: 'error',
+        error: err?.message || String(err),
+        calls: []
+      };
+      return;
+    }
+    channels = Array.isArray(channels) ? channels : [];
+    const currentIds = new Set();
+    const liveCalls = [];
+    for (const channel of channels) {
+      const channelId = channel?.id ? String(channel.id) : '';
+      if (!channelId) continue;
+      currentIds.add(channelId);
+      const stateRaw = channel?.state || '';
+      const normalizedState = normalizeAriChannelState(stateRaw);
+      const cachedBefore = getAriCallState(channelId) || {};
+      const prevState = cachedBefore.pollState;
+      trackAriCallState(channelId, 'pollState', normalizedState);
+      trackAriCallState(channelId, 'lastSeenAt', now.getTime());
+
+      let dialerMeta = null;
+      if (cachedBefore.dialerCallId) {
+        dialerMeta = {
+          callId: cachedBefore.dialerCallId,
+          campaignId: cachedBefore.campaignId || null,
+          leadId: cachedBefore.leadId || null,
+          userId: cachedBefore.userId || null
+        };
+      } else {
+        dialerMeta = await ensureDialerCallMetadataForChannel(channelId);
+      }
+
+      if (normalizedState === 'ringing' && !(cachedBefore.ring instanceof Date)) {
+        trackAriCallState(channelId, 'ring', now);
+      }
+      if (normalizedState === 'answered' && !(cachedBefore.answer instanceof Date)) {
+        trackAriCallState(channelId, 'answer', now);
+      }
+
+      const stateChanged = prevState !== normalizedState;
+      if (stateChanged && ['ringing', 'answered', 'dialing'].includes(normalizedState)) {
+        const currentCache = getAriCallState(channelId) || {};
+        const eventPayload = {
+          event: normalizedState,
+          status: normalizedState,
+          channelState: stateRaw || null,
+          timestamp: now.toISOString()
+        };
+        if (currentCache.ring instanceof Date) {
+          eventPayload.ringTime = currentCache.ring.toISOString();
+        }
+        if (currentCache.answer instanceof Date) {
+          eventPayload.answerTime = currentCache.answer.toISOString();
+          eventPayload.durationSec = Math.max(
+            0,
+            Math.round((now.getTime() - currentCache.answer.getTime()) / 1000)
+          );
+        }
+        await emitAriDialerEvent(channelId, eventPayload);
+      }
+
+      const latestCache = getAriCallState(channelId) || {};
+      const durationSec =
+        latestCache.answer instanceof Date
+          ? Math.max(0, Math.round((now.getTime() - latestCache.answer.getTime()) / 1000))
+          : 0;
+
+      liveCalls.push({
+        channelId,
+        callId: latestCache.dialerCallId || dialerMeta?.callId || null,
+        campaignId: latestCache.campaignId || dialerMeta?.campaignId || null,
+        leadId: latestCache.leadId || dialerMeta?.leadId || null,
+        state: normalizedState,
+        fromNumber: channel?.caller?.number || null,
+        toNumber: channel?.connected?.number || channel?.dialplan?.exten || null,
+        ringTime: latestCache.ring instanceof Date ? latestCache.ring.toISOString() : null,
+        answerTime: latestCache.answer instanceof Date ? latestCache.answer.toISOString() : null,
+        durationSec,
+        createdAt: channel?.creationtime || null
+      });
+
+      ariPollerKnownChannels.set(channelId, {
+        dialerCallId: latestCache.dialerCallId || dialerMeta?.callId || null,
+        lastState: normalizedState,
+        lastSeenAt: now.getTime()
+      });
+    }
+
+    for (const [channelId, info] of Array.from(ariPollerKnownChannels.entries())) {
+      if (currentIds.has(channelId)) continue;
+      if (now.getTime() - info.lastSeenAt < ARI_CHANNEL_POLL_HANGUP_GRACE_MS) continue;
+      ariPollerKnownChannels.delete(channelId);
+      const cached = popAriCallState(channelId);
+      const durationSec =
+        cached?.answer instanceof Date
+          ? Math.max(0, Math.round((now.getTime() - cached.answer.getTime()) / 1000))
+          : null;
+      await emitAriDialerEvent(channelId, {
+        event: 'hangup',
+        status: 'hangup',
+        ringTime: cached?.ring instanceof Date ? cached.ring.toISOString() : null,
+        answerTime: cached?.answer instanceof Date ? cached.answer.toISOString() : null,
+        hangupTime: now.toISOString(),
+        durationSec,
+        timestamp: now.toISOString(),
+        source: 'ari-poller'
+      });
+    }
+
+    ariChannelPollLastSnapshot = {
+      updatedAt: now.toISOString(),
+      status: 'ok',
+      calls: liveCalls
+    };
+  } finally {
+    ariChannelPollRunning = false;
+  }
+}
+
 function connectAriClient() {
   return new Promise((resolve, reject) => {
     try {
@@ -277,9 +517,11 @@ async function connectAri() {
     client.start(ARI_APP);
     ariReady = true;
     console.log(`[ari] Connected to ${ARI_HOST}:${ARI_PORT} (app=${ARI_APP})`);
+    startAriChannelPoller();
   } catch (err) {
     ariReady = false;
     console.error('[ari] connect error:', err?.message || err);
+    stopAriChannelPoller('disconnected');
     scheduleAriReconnect('connect-error');
   }
 }
@@ -397,6 +639,7 @@ function registerAriEventHandlers(client) {
   client.on('error', (err) => {
     console.error('[ari] client error:', err?.message || err);
     ariReady = false;
+    stopAriChannelPoller('disconnected');
     scheduleAriReconnect('client-error');
   });
 }
@@ -4524,6 +4767,21 @@ app.post('/login', loginLimiter, async (req, res) => {
     if (DEBUG) console.warn('login error', e.message || e);
     return res.status(500).render('login', { error: 'Login failed' });
   }
+});
+app.get('/api/me/dialer/live-calls', requireAuth, (req, res) => {
+  const snapshot = ariChannelPollLastSnapshot || { status: 'idle', calls: [], updatedAt: null };
+  const payload = {
+    success: true,
+    updatedAt: snapshot.updatedAt || null,
+    status: snapshot.status || 'idle',
+    ariReady: isAriDialerReady(),
+    pollIntervalMs: ARI_CHANNEL_POLL_INTERVAL_MS,
+    calls: Array.isArray(snapshot.calls)
+      ? snapshot.calls.map((call) => Object.assign({}, call))
+      : []
+  };
+  if (snapshot.error) payload.error = snapshot.error;
+  return res.json(payload);
 });
 
 function normalizeAudioRecordingName(raw) {
@@ -17900,15 +18158,21 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
   const durationSecRaw = Number(body.durationSec ?? body.duration_sec ?? body.duration ?? body.billsec ?? null);
   const priceRaw = body.price ?? body.cost ?? null;
 
-  let metadataJson = callRow.metadata;
-  try {
-    const current = metadataJson ? JSON.parse(metadataJson) : {};
-    current.ariEvent = body;
-    current.ariEventSource = source;
-    metadataJson = JSON.stringify(current);
-  } catch {
-    metadataJson = JSON.stringify({ ariEvent: body, ariEventSource: source });
+  const existingMetaRaw = callRow.metadata;
+  let metadataObj = {};
+  if (existingMetaRaw) {
+    if (typeof existingMetaRaw === 'string') {
+      try { metadataObj = JSON.parse(existingMetaRaw); } catch { metadataObj = {}; }
+    } else if (Buffer.isBuffer(existingMetaRaw)) {
+      try { metadataObj = JSON.parse(existingMetaRaw.toString('utf8')); } catch { metadataObj = {}; }
+    } else if (typeof existingMetaRaw === 'object') {
+      metadataObj = { ...existingMetaRaw };
+    }
   }
+  if (!metadataObj || typeof metadataObj !== 'object') metadataObj = {};
+  metadataObj.ariEvent = body;
+  metadataObj.ariEventSource = source;
+  const metadataJson = JSON.stringify(metadataObj);
 
   const normalizedStatus = statusRaw || eventRaw;
   const callResultPrimary = resultRaw || null;
