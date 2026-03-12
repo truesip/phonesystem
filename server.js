@@ -18087,8 +18087,7 @@ async function applyVoiceDialerEvent(rawBody, { source = 'webhook' } = {}) {
        SET status = ?, result = COALESCE(NULLIF(?, ''), result),
            duration_sec = COALESCE(?, duration_sec),
            price = COALESCE(?, price),
-           metadata = ?,
-           updated_at = NOW()
+           metadata = ?
      WHERE id = ?
      LIMIT 1`,
     [callStatus, callResult || null, durationValue, priceValue, metadataJson, callRowId]
