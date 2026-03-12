@@ -279,6 +279,20 @@ function popAriCallState(channelId) {
   return cached;
 }
 
+function connectAriClient() {
+  return new Promise((resolve, reject) => {
+    try {
+      const url = `http://${ARI_HOST}:${ARI_PORT}`;
+      AriClient.connect(url, ARI_USER, ARI_PASSWORD, (err, client) => {
+        if (err) return reject(err);
+        return resolve(client);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 async function connectAri() {
   if (!ARI_IS_CONFIGURED) {
     if (ARI_ENABLE && !AriClient) {
@@ -289,8 +303,7 @@ async function connectAri() {
 
   try {
     ariReady = false;
-    const url = `http://${ARI_HOST}:${ARI_PORT}`;
-    const client = await AriClient.connect(url, ARI_USER, ARI_PASSWORD);
+    const client = await connectAriClient();
     if (ariClientInstance && typeof ariClientInstance.removeAllListeners === 'function') {
       try { ariClientInstance.removeAllListeners(); } catch {}
     }
