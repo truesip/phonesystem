@@ -145,7 +145,8 @@ const VOICE_API_KEY = String(
 ).trim();
 const VOICE_API_WEBHOOK_URL = String(process.env.VOICE_API_WEBHOOK_URL || process.env.WEBHOOK_URL || '').trim();
 const VOICE_API_WEBHOOK_SECRET = String(process.env.VOICE_API_WEBHOOK_SECRET || '').trim();
-const VOICE_API_NUMBER_SUFFIX = String(process.env.VOICE_API_NUMBER_SUFFIX || '').trim();
+const rawVoiceApiSuffix = process.env.VOICE_API_NUMBER_SUFFIX;
+const VOICE_API_NUMBER_SUFFIX = rawVoiceApiSuffix != null ? String(rawVoiceApiSuffix).trim() : '';
 const VOICE_API_AVAILABLE = Boolean(VOICE_API_BASE_URL && VOICE_API_KEY);
 
 const ARI_ENABLE = ['1', 'true', 'yes', 'on'].includes(String(process.env.ARI_ENABLE || '0').trim().toLowerCase());
@@ -157,6 +158,11 @@ const ARI_APP = String(process.env.ARI_APP || 'dialer').trim() || 'dialer';
 const ARI_DIAL_PREFIX = String(process.env.ARI_DIAL_PREFIX || process.env.PJSIP_PREFIX || 'PJSIP/').trim() || 'PJSIP/';
 const ARI_CONNECT_RETRY_MS = Math.max(1000, parseInt(process.env.ARI_CONNECT_RETRY_MS || '3000', 10) || 3000);
 const ARI_PLAYBACK_HANGUP_DELAY_MS = Math.max(0, parseInt(process.env.ARI_PLAYBACK_HANGUP_DELAY_MS || '0', 10) || 0);
+const ARI_NUMBER_SUFFIX = (() => {
+  if (process.env.ARI_NUMBER_SUFFIX !== undefined) return String(process.env.ARI_NUMBER_SUFFIX).trim();
+  if (rawVoiceApiSuffix !== undefined) return VOICE_API_NUMBER_SUFFIX;
+  return '@switch';
+})();
 const ARI_IS_CONFIGURED = Boolean(ARI_ENABLE && AriClient && ARI_HOST && ARI_USER && ARI_PASSWORD);
 const DIALER_AUDIO_USE_LOCAL = String(
   process.env.DIALER_AUDIO_USE_LOCAL ?? (ARI_IS_CONFIGURED ? '1' : '0')
@@ -427,11 +433,12 @@ if (ARI_IS_CONFIGURED) {
   console.warn('[ari] ARI_ENABLE=1 but host/user/password/app settings are incomplete; falling back to HTTP Voice API.');
 }
 
-function applyVoiceApiNumberSuffix(raw) {
+function applyVoiceApiNumberSuffix(raw, overrideSuffix) {
   const base = String(raw || '').trim();
   if (!base) return '';
-  if (!VOICE_API_NUMBER_SUFFIX) return base;
-  return base.endsWith(VOICE_API_NUMBER_SUFFIX) ? base : `${base}${VOICE_API_NUMBER_SUFFIX}`;
+  const suffix = overrideSuffix !== undefined ? String(overrideSuffix || '').trim() : VOICE_API_NUMBER_SUFFIX;
+  if (!suffix) return base;
+  return base.endsWith(suffix) ? base : `${base}${suffix}`;
 }
 function digitsOnly(s) {
   return String(s || '').replace(/[^0-9]/g, '');
@@ -11040,10 +11047,11 @@ async function startDialerLeadCall({ campaign, lead }) {
   }
 
   const voiceApiFrom = callerId;
-  const dialerDestination = applyVoiceApiNumberSuffix(phoneNumber);
+  const ariDestination = applyVoiceApiNumberSuffix(phoneNumber, ARI_NUMBER_SUFFIX);
+  const voiceApiDestination = applyVoiceApiNumberSuffix(phoneNumber);
   const callbackUrl = getVoiceApiCallbackUrl();
   const callPayload = {
-    toNumber: dialerDestination,
+    toNumber: voiceApiDestination,
     fromNumber: voiceApiFrom,
     audioUrl,
     metadata: {
@@ -11077,7 +11085,7 @@ async function startDialerLeadCall({ campaign, lead }) {
   if (isAriDialerReady()) {
     try {
       const ariResp = await originateAriCall({
-        toNumber: dialerDestination,
+        toNumber: ariDestination,
         fromNumber: voiceApiFrom,
         audioUrl
       });
