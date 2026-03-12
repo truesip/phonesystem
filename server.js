@@ -10654,8 +10654,20 @@ async function startDialerLeadCall({ campaign, lead }) {
       data: callPayload
     });
 
-    const voiceUuid = voiceSubmitResponse?.uuid || voiceSubmitResponse?.callId || voiceSubmitResponse?.call_id || null;
-    const voiceJobId = voiceSubmitResponse?.jobId || voiceSubmitResponse?.job_id || null;
+    const voiceUuid =
+      voiceSubmitResponse?.uuid
+      || voiceSubmitResponse?.callId
+      || voiceSubmitResponse?.call_id
+      || voiceSubmitResponse?.job
+      || voiceSubmitResponse?.jobId
+      || voiceSubmitResponse?.job_id
+      || null;
+    const voiceJobId =
+      voiceSubmitResponse?.jobId
+      || voiceSubmitResponse?.job_id
+      || voiceSubmitResponse?.job
+      || voiceSubmitResponse?.uuid
+      || null;
     if (voiceUuid || voiceJobId) {
       try {
         await pool.execute(
