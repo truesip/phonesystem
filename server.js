@@ -294,14 +294,7 @@ function registerAriEventHandlers(client) {
     const channelId = event?.channel?.id;
     if (!channelId) return;
     const now = new Date();
-    const cached = trackAriCallState(channelId, 'answer', now);
-    await emitAriDialerEvent(channelId, {
-      event: 'answered',
-      status: 'answered',
-      ringTime: cached?.ring ? cached.ring.toISOString() : null,
-      answerTime: now.toISOString(),
-      timestamp: now.toISOString(),
-    });
+    trackAriCallState(channelId, 'stasisStart', now);
 
     const audio = (event?.args && event.args[0]) || event?.channel?.variables?.audio_url || '';
     if (audio) {
@@ -327,17 +320,34 @@ function registerAriEventHandlers(client) {
   });
 
   client.on('ChannelStateChange', async (event) => {
-    if (event?.channel?.state !== 'Ringing') return;
     const channelId = event?.channel?.id;
     if (!channelId) return;
-    const now = new Date();
-    trackAriCallState(channelId, 'ring', now);
-    await emitAriDialerEvent(channelId, {
-      event: 'ringing',
-      status: 'ringing',
-      ringTime: now.toISOString(),
-      timestamp: now.toISOString(),
-    });
+    const state = event?.channel?.state;
+    if (state === 'Ringing') {
+      const now = new Date();
+      trackAriCallState(channelId, 'ring', now);
+      await emitAriDialerEvent(channelId, {
+        event: 'ringing',
+        status: 'ringing',
+        ringTime: now.toISOString(),
+        timestamp: now.toISOString(),
+      });
+      return;
+    }
+    if (state === 'Up') {
+      const now = new Date();
+      const cached = trackAriCallState(channelId, 'answer', now) || {};
+      if (cached.answeredEventEmitted) return;
+      cached.answeredEventEmitted = true;
+      ariCallCache.set(channelId, cached);
+      await emitAriDialerEvent(channelId, {
+        event: 'answered',
+        status: 'answered',
+        ringTime: cached?.ring ? cached.ring.toISOString() : null,
+        answerTime: now.toISOString(),
+        timestamp: now.toISOString(),
+      });
+    }
   });
 
   client.on('ChannelDestroyed', async (event) => {
@@ -347,9 +357,23 @@ function registerAriEventHandlers(client) {
     const cached = popAriCallState(channelId);
     const durationSec =
       cached?.answer instanceof Date ? Math.max(0, Math.round((now.getTime() - cached.answer.getTime()) / 1000)) : null;
+    const causeText = String(event?.cause_txt || event?.cause || '').toUpperCase();
+    let result = null;
+    if (cached?.answer instanceof Date) {
+      result = 'completed';
+    } else if (causeText.includes('NO ANSWER')) {
+      result = 'no-answer';
+    } else if (causeText.includes('BUSY')) {
+      result = 'busy';
+    } else if (causeText.includes('CANCEL')) {
+      result = 'cancelled';
+    } else if (causeText.includes('CONGESTION')) {
+      result = 'failed';
+    }
     await emitAriDialerEvent(channelId, {
       event: 'hangup',
       status: 'hangup',
+      result,
       ringTime: cached?.ring ? cached.ring.toISOString() : null,
       answerTime: cached?.answer ? cached.answer.toISOString() : null,
       hangupTime: now.toISOString(),
@@ -10939,6 +10963,12 @@ async function startDialerLeadCall({ campaign, lead }) {
 
   if (providerUuid) {
     try {
+      trackAriCallState(providerUuid, 'dialerCallId', callId);
+      trackAriCallState(providerUuid, 'campaignId', campaignId);
+      trackAriCallState(providerUuid, 'leadId', leadId);
+      trackAriCallState(providerUuid, 'userId', userId);
+    } catch {}
+    try {
       await pool.execute(
         `UPDATE dialer_call_logs
            SET metadata = JSON_SET(
@@ -17845,6 +17875,12 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
 
   const campaignId = payloadCampaignId ?? (Number(callRow.campaign_id) || parsedIds.campaignId);
   const leadId = payloadLeadId ?? (Number(callRow.lead_id) || parsedIds.leadId);
+  const channelIdFromEvent = String(body.channelId || body.channel_id || '').trim();
+  if (channelIdFromEvent) {
+    try {
+      trackAriCallState(channelIdFromEvent, 'dialerCallId', storedCallId);
+    } catch {}
+  }
 
   const statusRaw = String(body.status || body.callStatus || '').trim().toLowerCase();
   const eventRaw = String(body.event || '').trim().toLowerCase();
@@ -17872,7 +17908,11 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
   }
   const callStatus = normalizedStatus || (callResult ? `result:${callResult}` : 'completed');
   const durationValue = Number.isFinite(durationSecRaw) ? durationSecRaw : null;
-  const priceValue = priceRaw != null && Number.isFinite(Number(priceRaw)) ? Number(priceRaw) : null;
+  let priceValue = priceRaw != null && Number.isFinite(Number(priceRaw)) ? Number(priceRaw) : null;
+  if ((!priceValue || priceValue <= 0) && durationValue && durationValue > 0 && eventRaw === 'hangup') {
+    const { price } = rateDialerOutboundCallPrice({ billsec: durationValue }) || {};
+    if (price && price > 0) priceValue = price;
+  }
 
   await pool.execute(
     `UPDATE dialer_call_logs
@@ -17900,6 +17940,8 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
     leadStatus = 'voicemail';
   } else if (callResult === 'transferred') {
     leadStatus = 'transferred';
+  } else if (['no-answer', 'busy', 'cancelled', 'canceled', 'timeout'].includes(callResult || '')) {
+    leadStatus = 'failed';
   } else if (
     statusForLead === 'answered' ||
     statusForLead === 'completed' ||
