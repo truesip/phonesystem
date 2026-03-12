@@ -31,6 +31,15 @@ const MySQLStore = require('express-mysql-session')(session);
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const { XMLParser } = require('fast-xml-parser');
+let AriClient = null;
+try {
+  AriClient = require('ari-client');
+} catch (err) {
+  AriClient = null;
+  if (process.env.ARI_ENABLE === '1') {
+    console.warn('[ari] ari-client module not installed; ARI integration is disabled.');
+  }
+}
 
 // Optional dependency used to generate PDFs for AI physical mail without DOCX templates.
 // Loaded lazily to avoid crashing older deployments that haven't installed it yet.
@@ -137,6 +146,21 @@ const VOICE_API_KEY = String(
 const VOICE_API_WEBHOOK_URL = String(process.env.VOICE_API_WEBHOOK_URL || process.env.WEBHOOK_URL || '').trim();
 const VOICE_API_WEBHOOK_SECRET = String(process.env.VOICE_API_WEBHOOK_SECRET || '').trim();
 const VOICE_API_NUMBER_SUFFIX = String(process.env.VOICE_API_NUMBER_SUFFIX || '').trim();
+const VOICE_API_AVAILABLE = Boolean(VOICE_API_BASE_URL && VOICE_API_KEY);
+
+const ARI_ENABLE = ['1', 'true', 'yes', 'on'].includes(String(process.env.ARI_ENABLE || '0').trim().toLowerCase());
+const ARI_HOST = String(process.env.ARI_HOST || '').trim();
+const ARI_PORT = Math.max(1, parseInt(process.env.ARI_PORT || '8088', 10) || 8088);
+const ARI_USER = String(process.env.ARI_USER || '').trim();
+const ARI_PASSWORD = String(process.env.ARI_PASSWORD || '').trim();
+const ARI_APP = String(process.env.ARI_APP || 'dialer').trim() || 'dialer';
+const ARI_DIAL_PREFIX = String(process.env.ARI_DIAL_PREFIX || process.env.PJSIP_PREFIX || 'PJSIP/').trim() || 'PJSIP/';
+const ARI_CONNECT_RETRY_MS = Math.max(1000, parseInt(process.env.ARI_CONNECT_RETRY_MS || '3000', 10) || 3000);
+const ARI_PLAYBACK_HANGUP_DELAY_MS = Math.max(0, parseInt(process.env.ARI_PLAYBACK_HANGUP_DELAY_MS || '0', 10) || 0);
+const ARI_IS_CONFIGURED = Boolean(ARI_ENABLE && AriClient && ARI_HOST && ARI_USER && ARI_PASSWORD);
+const DIALER_AUDIO_USE_LOCAL = String(
+  process.env.DIALER_AUDIO_USE_LOCAL ?? (ARI_IS_CONFIGURED ? '1' : '0')
+).trim().toLowerCase() !== '0';
 
 const dialerLeadUpload = multer({
   storage: multer.memoryStorage(),
@@ -198,6 +222,196 @@ async function voiceApiRequest({ method = 'GET', path: apiPath = '/', data, para
     maxBodyLength: 20 * 1024 * 1024,
   });
   return resp.data;
+}
+
+let ariClientInstance = null;
+let ariReady = false;
+let ariReconnectTimer = null;
+const ariCallCache = new Map();
+
+function scheduleAriReconnect(reason) {
+  if (!ARI_IS_CONFIGURED) return;
+  if (ariReconnectTimer) return;
+  const waitMs = ARI_CONNECT_RETRY_MS;
+  if (DEBUG && reason) console.warn('[ari] scheduling reconnect:', reason);
+  ariReconnectTimer = setTimeout(() => {
+    ariReconnectTimer = null;
+    connectAri().catch((err) => {
+      console.error('[ari] reconnect failed:', err?.message || err);
+      scheduleAriReconnect('reconnect-error');
+    });
+  }, waitMs);
+}
+
+function isAriDialerReady() {
+  return Boolean(ARI_IS_CONFIGURED && ariReady && ariClientInstance);
+}
+
+async function emitAriDialerEvent(channelId, eventPayload) {
+  if (!channelId) return;
+  try {
+    await applyVoiceDialerEvent(
+      {
+        callId: channelId,
+        uuid: channelId,
+        ...eventPayload,
+        provider: 'ari',
+      },
+      { source: 'ari' }
+    );
+  } catch (err) {
+    if (DEBUG) console.warn('[ari] applyVoiceDialerEvent failed:', err?.message || err);
+  }
+}
+
+function trackAriCallState(channelId, key, value) {
+  if (!channelId) return;
+  const cached = ariCallCache.get(channelId) || {};
+  cached[key] = value;
+  ariCallCache.set(channelId, cached);
+  return cached;
+}
+
+function popAriCallState(channelId) {
+  if (!channelId) return {};
+  const cached = ariCallCache.get(channelId) || {};
+  ariCallCache.delete(channelId);
+  return cached;
+}
+
+async function connectAri() {
+  if (!ARI_IS_CONFIGURED) {
+    if (ARI_ENABLE && !AriClient) {
+      console.warn('[ari] ARI_ENABLE=1 but ari-client dependency is unavailable.');
+    }
+    return;
+  }
+
+  try {
+    ariReady = false;
+    const url = `http://${ARI_HOST}:${ARI_PORT}`;
+    const client = await AriClient.connect(url, ARI_USER, ARI_PASSWORD);
+    if (ariClientInstance && typeof ariClientInstance.removeAllListeners === 'function') {
+      try { ariClientInstance.removeAllListeners(); } catch {}
+    }
+    ariClientInstance = client;
+    registerAriEventHandlers(client);
+    client.start(ARI_APP);
+    ariReady = true;
+    console.log(`[ari] Connected to ${ARI_HOST}:${ARI_PORT} (app=${ARI_APP})`);
+  } catch (err) {
+    ariReady = false;
+    console.error('[ari] connect error:', err?.message || err);
+    scheduleAriReconnect('connect-error');
+  }
+}
+
+function registerAriEventHandlers(client) {
+  if (!client) return;
+  if (typeof client.removeAllListeners === 'function') {
+    client.removeAllListeners();
+  }
+
+  client.on('StasisStart', async (event) => {
+    const channelId = event?.channel?.id;
+    if (!channelId) return;
+    const now = new Date();
+    const cached = trackAriCallState(channelId, 'answer', now);
+    await emitAriDialerEvent(channelId, {
+      event: 'answered',
+      status: 'answered',
+      ringTime: cached?.ring ? cached.ring.toISOString() : null,
+      answerTime: now.toISOString(),
+      timestamp: now.toISOString(),
+    });
+
+    const audio = (event?.args && event.args[0]) || event?.channel?.variables?.audio_url || '';
+    if (audio) {
+      try {
+        await client.channels.answer({ channelId });
+      } catch (err) {
+        if (DEBUG) console.warn('[ari] answer error:', err?.message || err);
+      }
+      try {
+        const playback = await client.channels.play({ channelId, media: audio });
+        playback.once('PlaybackFinished', () => {
+          setTimeout(() => {
+            client.channels.hangup({ channelId }).catch((err) => {
+              if (DEBUG) console.warn('[ari] hangup error:', err?.message || err);
+            });
+          }, ARI_PLAYBACK_HANGUP_DELAY_MS);
+        });
+      } catch (err) {
+        if (DEBUG) console.warn('[ari] playback error:', err?.message || err);
+        client.channels.hangup({ channelId }).catch(() => {});
+      }
+    }
+  });
+
+  client.on('ChannelStateChange', async (event) => {
+    if (event?.channel?.state !== 'Ringing') return;
+    const channelId = event?.channel?.id;
+    if (!channelId) return;
+    const now = new Date();
+    trackAriCallState(channelId, 'ring', now);
+    await emitAriDialerEvent(channelId, {
+      event: 'ringing',
+      status: 'ringing',
+      ringTime: now.toISOString(),
+      timestamp: now.toISOString(),
+    });
+  });
+
+  client.on('ChannelDestroyed', async (event) => {
+    const channelId = event?.channel?.id;
+    if (!channelId) return;
+    const now = new Date();
+    const cached = popAriCallState(channelId);
+    const durationSec =
+      cached?.answer instanceof Date ? Math.max(0, Math.round((now.getTime() - cached.answer.getTime()) / 1000)) : null;
+    await emitAriDialerEvent(channelId, {
+      event: 'hangup',
+      status: 'hangup',
+      ringTime: cached?.ring ? cached.ring.toISOString() : null,
+      answerTime: cached?.answer ? cached.answer.toISOString() : null,
+      hangupTime: now.toISOString(),
+      durationSec,
+      timestamp: now.toISOString(),
+    });
+  });
+
+  client.on('error', (err) => {
+    console.error('[ari] client error:', err?.message || err);
+    ariReady = false;
+    scheduleAriReconnect('client-error');
+  });
+}
+
+async function originateAriCall({ toNumber, fromNumber, audioUrl }) {
+  if (!isAriDialerReady()) {
+    throw new Error('ARI not connected');
+  }
+  if (!toNumber || !fromNumber || !audioUrl) {
+    throw new Error('Missing ARI originate parameters');
+  }
+  const endpoint = `${ARI_DIAL_PREFIX}${toNumber}`;
+  const channel = await ariClientInstance.channels.originate({
+    endpoint,
+    callerId: fromNumber,
+    app: ARI_APP,
+    appArgs: audioUrl,
+    variables: { audio_url: audioUrl }
+  });
+  return { channelId: channel?.id || null };
+}
+
+if (ARI_IS_CONFIGURED) {
+  connectAri().catch((err) => {
+    console.error('[ari] initial connect failed:', err?.message || err);
+    scheduleAriReconnect('initial-connect-error');
+  });
+} else if (ARI_ENABLE) {
+  console.warn('[ari] ARI_ENABLE=1 but host/user/password/app settings are incomplete; falling back to HTTP Voice API.');
 }
 
 function applyVoiceApiNumberSuffix(raw) {
@@ -2454,6 +2668,21 @@ async function initDb() {
 
   await ensureBigintPK('dialer_audio_recordings');
 
+  await pool.query(`CREATE TABLE IF NOT EXISTS dialer_audio_files (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    file_name VARCHAR(255) NOT NULL,
+    mime_type VARCHAR(128) NOT NULL,
+    data LONGBLOB NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_dialer_audio_file_name (file_name),
+    KEY idx_dialer_audio_files_user (user_id),
+    CONSTRAINT fk_dialer_audio_files_user FOREIGN KEY (user_id) REFERENCES signup_users(id) ON DELETE CASCADE
+  )`);
+
+  await ensureBigintPK('dialer_audio_files');
+
   try {
     await pool.query(`
       INSERT IGNORE INTO dialer_audio_recordings (user_id, recording_name, playback_uri, metadata)
@@ -4314,12 +4543,100 @@ function resolvePlaybackUriFromRow(row) {
   return '';
 }
 
+function isLocalDialerAudioEnabled() {
+  return DIALER_AUDIO_USE_LOCAL || (!VOICE_API_AVAILABLE && ARI_IS_CONFIGURED);
+}
+
+function buildPublicMediaUrl(fileName, req) {
+  const safeName = encodeURIComponent(String(fileName || '').trim());
+  if (!safeName) return '';
+  const baseEnv = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/$/, '');
+  if (baseEnv) return `${baseEnv}/media/${safeName}`;
+  if (req && typeof req.get === 'function') {
+    const host = req.get('host');
+    const forwardedProto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const proto = forwardedProto || req.protocol || 'http';
+    if (host) return `${proto}://${host}/media/${safeName}`;
+  }
+  return `http://localhost:${PORT}/media/${safeName}`;
+}
+
+function buildSoundPlaybackUri(fileName, req) {
+  const mediaUrl = buildPublicMediaUrl(fileName, req);
+  return mediaUrl ? `sound:${mediaUrl}` : '';
+}
+
+async function convertBufferTo8kMonoWav(buffer) {
+  const tmpDir = os.tmpdir();
+  const id = (crypto.randomUUID && crypto.randomUUID()) || crypto.randomBytes(16).toString('hex');
+  const inPath = path.join(tmpDir, `dialer_audio_in_${id}`);
+  const outPath = path.join(tmpDir, `dialer_audio_out_${id}.wav`);
+  await fs.promises.writeFile(inPath, buffer);
+  try {
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-i', inPath,
+      '-ar', '8000',
+      '-ac', '1',
+      '-sample_fmt', 's16',
+      '-vn',
+      outPath
+    ]);
+    return await fs.promises.readFile(outPath);
+  } catch (err) {
+    if (DEBUG) console.warn('[dialer.audio] ffmpeg conversion failed; using original buffer:', err?.message || err);
+    return buffer;
+  } finally {
+    fs.promises.unlink(inPath).catch(() => {});
+    fs.promises.unlink(outPath).catch(() => {});
+  }
+}
+
+function generateLocalRecordingName(originalName) {
+  const base = normalizeAudioRecordingName(originalName || 'audio');
+  const safeBase = (base || 'audio')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 64);
+  const ts = Date.now();
+  return `${safeBase || 'audio'}_${ts}.wav`;
+}
+
+async function saveLocalDialerAudioFile({ userId, fileName, buffer, mimeType }) {
+  if (!pool) throw new Error('Database not configured');
+  await pool.execute(
+    `INSERT INTO dialer_audio_files (user_id, file_name, mime_type, data)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), mime_type = VALUES(mime_type),
+       data = VALUES(data), updated_at = CURRENT_TIMESTAMP`,
+    [userId, fileName, mimeType || 'audio/wav', buffer]
+  );
+}
+
+async function fetchLocalDialerAudioFile(fileName) {
+  if (!pool || !fileName) return null;
+  const [rows] = await pool.execute(
+    'SELECT file_name, mime_type, data FROM dialer_audio_files WHERE file_name = ? LIMIT 1',
+    [fileName]
+  );
+  return rows && rows[0] ? rows[0] : null;
+}
+
+async function deleteLocalDialerAudioFile({ userId, fileName }) {
+  if (!pool || !fileName) return;
+  await pool.execute(
+    'DELETE FROM dialer_audio_files WHERE file_name = ? AND user_id = ? LIMIT 1',
+    [fileName, userId]
+  );
+}
+
 async function listDialerAudioRowsForUser(userId) {
   if (!pool || !userId) return [];
   try {
     const limit = Number(DIALER_AUDIO_LIST_LIMIT) || 500;
     const [rows] = await pool.execute(
-      `SELECT recording_name, playback_uri, metadata
+      `SELECT recording_name, playback_uri, metadata, created_at
        FROM dialer_audio_recordings
        WHERE user_id = ?
        ORDER BY created_at DESC
@@ -4372,6 +4689,27 @@ async function getDialerAudioRecordingForUser({ userId, recordingName }) {
   }
 }
 
+app.get('/media/:name', async (req, res) => {
+  try {
+    if (!pool) return res.status(503).send('database not configured');
+    const rawName = String(req.params.name || '').trim();
+    if (!rawName) return res.status(404).send('not found');
+    const sanitized = rawName.replace(/[^a-zA-Z0-9._-]/g, '');
+    if (!sanitized) return res.status(404).send('not found');
+    const row = await fetchLocalDialerAudioFile(sanitized);
+    if (!row) return res.status(404).send('not found');
+    res.setHeader('Content-Type', row.mime_type || 'audio/wav');
+    if (row.data && typeof row.data.length === 'number') {
+      res.setHeader('Content-Length', row.data.length);
+    }
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    res.send(row.data);
+  } catch (err) {
+    if (DEBUG) console.error('[media] error serving audio:', err?.message || err);
+    res.status(500).send('media error');
+  }
+});
+
 app.get('/api/me/dialer/audio', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
@@ -4379,6 +4717,25 @@ app.get('/api/me/dialer/audio', requireAuth, async (req, res) => {
     const ownedRows = await listDialerAudioRowsForUser(userId);
     if (!ownedRows.length) {
       return res.json({ success: true, data: [] });
+    }
+
+    if (isLocalDialerAudioEnabled()) {
+      const data = [];
+      for (const row of ownedRows) {
+        const key = normalizeAudioRecordingName(row.recording_name);
+        if (!key) continue;
+        let playbackUri = resolvePlaybackUriFromRow(row);
+        if (!playbackUri) playbackUri = buildSoundPlaybackUri(key, req);
+        if (!playbackUri) continue;
+        const meta = parseDialerAudioMetadata(row) || {};
+        data.push({
+          recordingName: meta.recordingName || key,
+          playbackUri,
+          source: 'local',
+          uploadedAt: row.created_at || null
+        });
+      }
+      return res.json({ success: true, data });
     }
 
     let remoteItems = [];
@@ -4429,6 +4786,31 @@ app.post('/api/me/dialer/audio/upload', requireAuth, dialerAudioLibraryUpload.si
     if (!file || !file.buffer) {
       return res.status(400).json({ success: false, message: 'Missing audio file (field name: file)' });
     }
+    if (isLocalDialerAudioEnabled()) {
+      const converted = await convertBufferTo8kMonoWav(file.buffer);
+      const recordingName = generateLocalRecordingName(file.originalname || 'audio');
+      await saveLocalDialerAudioFile({
+        userId,
+        fileName: recordingName,
+        buffer: converted,
+        mimeType: 'audio/wav'
+      });
+      const playbackUri = buildSoundPlaybackUri(recordingName, req);
+      const payload = {
+        recordingName,
+        playbackUri,
+        mimeType: 'audio/wav',
+        source: 'local'
+      };
+      await upsertDialerAudioRecording({
+        userId,
+        recordingName,
+        playbackUri,
+        metadata: payload
+      });
+      return res.json({ success: true, data: payload });
+    }
+
     const form = new FormData();
     form.append('file', file.buffer, {
       filename: file.originalname || 'audio.wav',
@@ -4478,6 +4860,19 @@ app.delete('/api/me/dialer/audio/:name', requireAuth, async (req, res) => {
     const owned = await getDialerAudioRecordingForUser({ userId, recordingName: rawName });
     if (!owned) {
       return res.status(404).json({ success: false, message: 'Audio recording not found' });
+    }
+
+    if (isLocalDialerAudioEnabled()) {
+      await deleteLocalDialerAudioFile({ userId, fileName: rawName });
+      try {
+        await pool.execute(
+          'DELETE FROM dialer_audio_recordings WHERE user_id = ? AND recording_name = ? LIMIT 1',
+          [userId, rawName]
+        );
+      } catch (err) {
+        if (DEBUG) console.warn('[dialer.audio.delete] Failed to delete ownership row:', err?.message || err);
+      }
+      return res.json({ success: true, data: { deleted: rawName, source: 'local' } });
     }
 
     let data = null;
@@ -10607,6 +11002,7 @@ async function startDialerLeadCall({ campaign, lead }) {
     call_id: callId,
     call_domain: callDomain,
     voice: {
+      provider: ARI_IS_CONFIGURED ? 'ari' : (VOICE_API_AVAILABLE ? 'voice_api' : null),
       uuid: null,
       jobId: null
     }
@@ -10631,12 +11027,10 @@ async function startDialerLeadCall({ campaign, lead }) {
   }
 
   const voiceApiFrom = callerId;
-  const voiceApiTo = applyVoiceApiNumberSuffix(phoneNumber);
-
+  const dialerDestination = applyVoiceApiNumberSuffix(phoneNumber);
   const callbackUrl = getVoiceApiCallbackUrl();
-  let voiceSubmitResponse = null;
   const callPayload = {
-    toNumber: voiceApiTo,
+    toNumber: dialerDestination,
     fromNumber: voiceApiFrom,
     audioUrl,
     metadata: {
@@ -10647,62 +11041,7 @@ async function startDialerLeadCall({ campaign, lead }) {
   };
   if (callbackUrl) callPayload.webhookUrl = callbackUrl;
 
-  try {
-    voiceSubmitResponse = await voiceApiRequest({
-      method: 'POST',
-      path: '/call',
-      data: callPayload
-    });
-
-    const voiceUuid =
-      voiceSubmitResponse?.uuid
-      || voiceSubmitResponse?.callId
-      || voiceSubmitResponse?.call_id
-      || voiceSubmitResponse?.job
-      || voiceSubmitResponse?.jobId
-      || voiceSubmitResponse?.job_id
-      || null;
-    const voiceJobId =
-      voiceSubmitResponse?.jobId
-      || voiceSubmitResponse?.job_id
-      || voiceSubmitResponse?.job
-      || voiceSubmitResponse?.uuid
-      || null;
-    if (voiceUuid || voiceJobId) {
-      try {
-        await pool.execute(
-          `UPDATE dialer_call_logs
-             SET metadata = JSON_SET(
-               COALESCE(metadata, '{}'),
-               '$.voice.uuid', ?,
-               '$.voice.jobId', ?
-             )
-           WHERE call_id = ?
-           LIMIT 1`,
-          [voiceUuid, voiceJobId, callId]
-        );
-      } catch (e) {
-        if (DEBUG) console.warn('[dialer.worker] Failed to store voice UUID/jobId:', e?.message || e);
-      }
-    }
-
-    try {
-      await pool.execute(
-        'UPDATE dialer_leads SET status = ?, last_call_at = NOW() WHERE id = ? AND user_id = ? LIMIT 1',
-        ['dialing', leadId, userId]
-      );
-      await pool.execute(
-        `UPDATE dialer_call_logs
-         SET status = 'dialing', result = 'submitted'
-         WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
-        [leadId]
-      );
-    } catch {}
-
-    return { ok: true };
-  } catch (e) {
-    const msg = e?.response?.data?.message || e?.message || 'Failed to start outbound call';
-    if (DEBUG) console.warn('[dialer.worker] outbound call failed:', msg);
+  const markLeadFailed = async (message) => {
     try {
       await pool.execute(
         'UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1',
@@ -10712,11 +11051,111 @@ async function startDialerLeadCall({ campaign, lead }) {
         `UPDATE dialer_call_logs
          SET status = 'error', result = 'failed', notes = COALESCE(NULLIF(notes,''), ?)
          WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
-        [String(msg).slice(0, 500), leadId]
+        [String(message || 'Failed to start outbound call').slice(0, 500), leadId]
       );
     } catch {}
+  };
+
+  let placed = false;
+  let outboundProvider = null;
+  let providerUuid = null;
+  let providerJobId = null;
+
+  if (isAriDialerReady()) {
+    try {
+      const ariResp = await originateAriCall({
+        toNumber: dialerDestination,
+        fromNumber: voiceApiFrom,
+        audioUrl
+      });
+      providerUuid = ariResp?.channelId || null;
+      providerJobId = ariResp?.channelId || null;
+      outboundProvider = 'ari';
+      placed = true;
+    } catch (err) {
+      if (!VOICE_API_AVAILABLE) {
+        const msg = err?.message || 'Failed to start ARI outbound call';
+        if (DEBUG) console.warn('[dialer.worker] ARI originate failed:', msg);
+        await markLeadFailed(msg);
+        return { ok: false };
+      }
+      if (DEBUG) console.warn('[dialer.worker] ARI originate failed; falling back to Voice API:', err?.message || err);
+    }
+  }
+
+  if (!placed) {
+    if (!VOICE_API_AVAILABLE) {
+      await markLeadFailed('Voice API not configured');
+      return { ok: false };
+    }
+    try {
+      const voiceSubmitResponse = await voiceApiRequest({
+        method: 'POST',
+        path: '/call',
+        data: callPayload
+      });
+      providerUuid =
+        voiceSubmitResponse?.uuid
+        || voiceSubmitResponse?.callId
+        || voiceSubmitResponse?.call_id
+        || voiceSubmitResponse?.job
+        || voiceSubmitResponse?.jobId
+        || voiceSubmitResponse?.job_id
+        || null;
+      providerJobId =
+        voiceSubmitResponse?.jobId
+        || voiceSubmitResponse?.job_id
+        || voiceSubmitResponse?.job
+        || voiceSubmitResponse?.uuid
+        || null;
+      outboundProvider = 'voice_api';
+      placed = true;
+    } catch (e) {
+      const msg = e?.response?.data?.message || e?.message || 'Failed to start outbound call';
+      if (DEBUG) console.warn('[dialer.worker] outbound call failed:', msg);
+      await markLeadFailed(msg);
+      return { ok: false };
+    }
+  }
+
+  if (!placed) {
+    await markLeadFailed('Unable to start outbound call');
     return { ok: false };
   }
+
+  if (outboundProvider || providerUuid || providerJobId) {
+    try {
+      await pool.execute(
+        `UPDATE dialer_call_logs
+           SET metadata = JSON_SET(
+             COALESCE(metadata, '{}'),
+             '$.voice.provider', ?,
+             '$.voice.uuid', ?,
+             '$.voice.jobId', ?
+           )
+         WHERE call_id = ?
+         LIMIT 1`,
+        [outboundProvider, providerUuid, providerJobId, callId]
+      );
+    } catch (e) {
+      if (DEBUG) console.warn('[dialer.worker] Failed to store voice provider metadata:', e?.message || e);
+    }
+  }
+
+  try {
+    await pool.execute(
+      'UPDATE dialer_leads SET status = ?, last_call_at = NOW() WHERE id = ? AND user_id = ? LIMIT 1',
+      ['dialing', leadId, userId]
+    );
+    await pool.execute(
+      `UPDATE dialer_call_logs
+       SET status = 'dialing', result = 'submitted'
+       WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
+      [leadId]
+    );
+  } catch {}
+
+  return { ok: true };
 }
 
 let dialerWorkerKickTimer = null;
@@ -17542,6 +17981,137 @@ async function buildCallerMemoryForDialin({ userId, agentId, fromDigits, exclude
   }
 }
 
+async function applyVoiceDialerEvent(rawBody, { source = 'webhook' } = {}) {
+  if (!pool) throw new Error('Database not configured');
+
+  const body = (rawBody && typeof rawBody === 'object') ? rawBody : {};
+  let callId = String(
+    body.callId
+    || body.call_id
+    || body.uuid
+    || body.metadata?.callId
+    || body.metadata?.uuid
+    || ''
+  ).trim();
+  if (!callId) {
+    return { status: 400, error: 'callId is required' };
+  }
+  let storedCallId = callId;
+  let parsedIds = parseDialerCallIdentifier(storedCallId);
+  const payloadCampaignId = Number(body.campaignId ?? body.metadata?.campaignId) || null;
+  const payloadLeadId = Number(body.leadId ?? body.metadata?.leadId) || null;
+
+  let [rows] = await pool.execute(
+    'SELECT id, campaign_id, lead_id, user_id, metadata, call_id FROM dialer_call_logs WHERE call_id = ? LIMIT 1',
+    [storedCallId]
+  );
+  let callRow = rows && rows[0] ? rows[0] : null;
+  if (!callRow && callId) {
+    try {
+      const [altRows] = await pool.execute(
+        `SELECT id, campaign_id, lead_id, user_id, metadata, call_id
+         FROM dialer_call_logs
+         WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.voice.uuid')) = ?
+            OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.voice.jobId')) = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [callId, callId]
+      );
+      callRow = altRows && altRows[0] ? altRows[0] : null;
+    } catch (e) {
+      if (DEBUG) console.warn('[voice.events] fallback lookup failed:', e?.message || e);
+    }
+  }
+  if (!callRow) {
+    if (DEBUG) console.warn('[voice.events] call identifier not found', { source, callId });
+    return { status: 202, ignored: true };
+  }
+  const callRowId = Number(callRow.id);
+  storedCallId = String(callRow.call_id || storedCallId || callId || '').trim();
+  parsedIds = parseDialerCallIdentifier(storedCallId);
+
+  const campaignId = payloadCampaignId ?? (Number(callRow.campaign_id) || parsedIds.campaignId);
+  const leadId = payloadLeadId ?? (Number(callRow.lead_id) || parsedIds.leadId);
+
+  const statusRaw = String(body.status || body.callStatus || '').trim().toLowerCase();
+  const eventRaw = String(body.event || '').trim().toLowerCase();
+  const resultRaw = String(body.result || body.outcome || '').trim().toLowerCase();
+  const durationSecRaw = Number(body.durationSec ?? body.duration_sec ?? body.duration ?? body.billsec ?? null);
+  const priceRaw = body.price ?? body.cost ?? null;
+
+  let metadataJson = callRow.metadata;
+  try {
+    const current = metadataJson ? JSON.parse(metadataJson) : {};
+    current.voiceWebhook = body;
+    current.voiceWebhookSource = source;
+    metadataJson = JSON.stringify(current);
+  } catch {
+    metadataJson = JSON.stringify({ voiceWebhook: body, voiceWebhookSource: source });
+  }
+
+  const normalizedStatus = statusRaw || eventRaw;
+  const callResultPrimary = resultRaw || null;
+  let callResult = callResultPrimary;
+  if (!callResult) {
+    if (eventRaw === 'answered') callResult = 'answered';
+    else if (eventRaw === 'hangup') callResult = 'hangup';
+    else if (eventRaw === 'ringing') callResult = 'ringing';
+  }
+  const callStatus = normalizedStatus || (callResult ? `result:${callResult}` : 'completed');
+  const durationValue = Number.isFinite(durationSecRaw) ? durationSecRaw : null;
+  const priceValue = priceRaw != null && Number.isFinite(Number(priceRaw)) ? Number(priceRaw) : null;
+
+  await pool.execute(
+    `UPDATE dialer_call_logs
+       SET status = ?, result = COALESCE(NULLIF(?, ''), result),
+           duration_sec = COALESCE(?, duration_sec),
+           price = COALESCE(?, price),
+           metadata = ?,
+           updated_at = NOW()
+     WHERE id = ?
+     LIMIT 1`,
+    [callStatus, callResult || null, durationValue, priceValue, metadataJson, callRowId]
+  );
+
+  let leadStatus = null;
+  const statusForLead = normalizedStatus || callResult || '';
+  if (['submitted', 'dialing', 'in-progress', 'ringing'].includes(statusForLead)) {
+    leadStatus = 'dialing';
+  } else if (statusForLead === 'failed' || callResult === 'failed') {
+    leadStatus = 'failed';
+  } else if (statusForLead === 'hangup') {
+    if (callResult === 'failed') leadStatus = 'failed';
+    else if (callResult === 'voicemail') leadStatus = 'voicemail';
+    else if (callResult === 'transferred') leadStatus = 'transferred';
+    else leadStatus = 'completed';
+  } else if (callResult === 'voicemail') {
+    leadStatus = 'voicemail';
+  } else if (callResult === 'transferred') {
+    leadStatus = 'transferred';
+  } else if (
+    statusForLead === 'answered' ||
+    statusForLead === 'completed' ||
+    statusForLead === 'finished'
+  ) {
+    leadStatus = 'completed';
+  }
+
+  if (leadStatus && leadId) {
+    await pool.execute(
+      `UPDATE dialer_leads
+         SET status = ?, last_call_at = NOW(), updated_at = NOW()
+       WHERE id = ? LIMIT 1`,
+      [leadStatus, leadId]
+    );
+  }
+
+  try {
+    requestDialerWorkerTick({ reason: `voice-event:${source}`, immediate: true });
+  } catch {}
+
+  return { status: 200, success: true, callId: storedCallId, campaignId, leadId };
+}
+
 app.post('/webhooks/voice/dialer', async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
@@ -17566,126 +18136,13 @@ app.post('/webhooks/voice/dialer', async (req, res) => {
       }
     }
 
-    const body = (req.body && typeof req.body === 'object') ? req.body : {};
-    let callId = String(
-      body.callId
-      || body.call_id
-      || body.uuid
-      || body.metadata?.callId
-      || body.metadata?.uuid
-      || ''
-    ).trim();
-    if (!callId) {
-      return res.status(400).json({ success: false, message: 'callId is required' });
+    const result = await applyVoiceDialerEvent(req.body, { source: 'webhook' });
+    if (result.status === 400) {
+      return res.status(400).json({ success: false, message: result.error || 'callId is required' });
     }
-    let storedCallId = callId;
-    let parsedIds = parseDialerCallIdentifier(storedCallId);
-    const payloadCampaignId = Number(body.campaignId ?? body.metadata?.campaignId) || null;
-    const payloadLeadId = Number(body.leadId ?? body.metadata?.leadId) || null;
-
-    const [rows] = await pool.execute(
-      'SELECT id, campaign_id, lead_id, user_id, metadata, call_id FROM dialer_call_logs WHERE call_id = ? LIMIT 1',
-      [callId]
-    );
-    let callRow = rows && rows[0] ? rows[0] : null;
-    if (!callRow && callId) {
-      try {
-        const [altRows] = await pool.execute(
-          `SELECT id, campaign_id, lead_id, user_id, metadata, call_id
-           FROM dialer_call_logs
-           WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.voice.uuid')) = ?
-              OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.voice.jobId')) = ?
-           ORDER BY id DESC
-           LIMIT 1`,
-          [callId, callId]
-        );
-        callRow = altRows && altRows[0] ? altRows[0] : null;
-      } catch (e) {
-        if (DEBUG) console.warn('[voice.webhook] fallback lookup failed:', e?.message || e);
-      }
-    }
-    if (!callRow) {
-      if (DEBUG) console.warn('[voice.webhook] call identifier not found', callId);
+    if (result.status === 202) {
       return res.status(202).json({ success: true, ignored: true });
     }
-    const callRowId = Number(callRow.id);
-    storedCallId = String(callRow.call_id || storedCallId || callId || '').trim();
-    parsedIds = parseDialerCallIdentifier(storedCallId);
-
-    const campaignId = payloadCampaignId ?? (Number(callRow.campaign_id) || parsedIds.campaignId);
-    const leadId = payloadLeadId ?? (Number(callRow.lead_id) || parsedIds.leadId);
-
-    const statusRaw = String(body.status || body.callStatus || '').trim().toLowerCase();
-    const eventRaw = String(body.event || '').trim().toLowerCase();
-    const resultRaw = String(body.result || body.outcome || '').trim().toLowerCase();
-    const durationSecRaw = Number(body.durationSec ?? body.duration_sec ?? body.duration ?? body.billsec ?? null);
-    const priceRaw = body.price ?? body.cost ?? null;
-
-    let metadataJson = callRow.metadata;
-    try {
-      const current = metadataJson ? JSON.parse(metadataJson) : {};
-      current.voiceWebhook = body;
-      metadataJson = JSON.stringify(current);
-    } catch {
-      metadataJson = JSON.stringify({ voiceWebhook: body });
-    }
-
-    const normalizedStatus = statusRaw || eventRaw;
-    const callResultPrimary = resultRaw || null;
-    let callResult = callResultPrimary;
-    if (!callResult) {
-      if (eventRaw === 'answered') callResult = 'answered';
-      else if (eventRaw === 'hangup') callResult = 'hangup';
-      else if (eventRaw === 'ringing') callResult = 'ringing';
-    }
-    const callStatus = normalizedStatus || (callResult ? `result:${callResult}` : 'completed');
-    const durationValue = Number.isFinite(durationSecRaw) ? durationSecRaw : null;
-    const priceValue = priceRaw != null && Number.isFinite(Number(priceRaw)) ? Number(priceRaw) : null;
-
-    await pool.execute(
-      `UPDATE dialer_call_logs
-         SET status = ?, result = COALESCE(NULLIF(?, ''), result),
-             duration_sec = COALESCE(?, duration_sec),
-             price = COALESCE(?, price),
-             metadata = ?,
-             updated_at = NOW()
-       WHERE id = ?
-       LIMIT 1`,
-      [callStatus, callResult || null, durationValue, priceValue, metadataJson, callRowId]
-    );
-
-    let leadStatus = null;
-    const statusForLead = normalizedStatus || callResult || '';
-    if (['submitted', 'dialing', 'in-progress', 'ringing'].includes(statusForLead)) {
-      leadStatus = 'dialing';
-    } else if (statusForLead === 'failed' || callResult === 'failed') {
-      leadStatus = 'failed';
-    } else if (statusForLead === 'hangup') {
-      if (callResult === 'failed') leadStatus = 'failed';
-      else if (callResult === 'voicemail') leadStatus = 'voicemail';
-      else if (callResult === 'transferred') leadStatus = 'transferred';
-      else leadStatus = 'completed';
-    } else if (callResult === 'voicemail') {
-      leadStatus = 'voicemail';
-    } else if (callResult === 'transferred') {
-      leadStatus = 'transferred';
-    } else if (
-      statusForLead === 'answered' ||
-      statusForLead === 'completed' ||
-      statusForLead === 'finished'
-    ) {
-      leadStatus = 'completed';
-    }
-
-    if (leadStatus && leadId) {
-      await pool.execute(
-        `UPDATE dialer_leads
-           SET status = ?, last_call_at = NOW(), updated_at = NOW()
-         WHERE id = ? LIMIT 1`,
-        [leadStatus, leadId]
-      );
-    }
-
     return res.json({ success: true });
   } catch (e) {
     if (DEBUG) console.error('[voice.webhook] error', e?.message || e);
