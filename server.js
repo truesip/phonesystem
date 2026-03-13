@@ -17,7 +17,8 @@ const bodyParser = require('body-parser');
 const axios = require('axios');
 const Stripe = require('stripe');
 const crypto = require('crypto');
-const https = require('https');
+const AriService = require('./services/ari-service');
+const { v4: uuidv4 } = require('uuid');
 const zlib = require('zlib');
 const mysql = require('mysql2/promise');
 const nodemailer = require('nodemailer');
@@ -132,36 +133,6 @@ const DIALER_OUTBOUND_RATE_PER_MIN = parseFloat(
 const DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE = String(process.env.DIALER_OUTBOUND_BILLING_ROUND_UP_TO_MINUTE ?? '0') !== '0';
 
 
-const ARI_ENABLE = ['1', 'true', 'yes', 'on'].includes(String(process.env.ARI_ENABLE || '0').trim().toLowerCase());
-const ARI_HOST = String(process.env.ARI_HOST || '').trim();
-const ARI_PORT = Math.max(1, parseInt(process.env.ARI_PORT || '8088', 10) || 8088);
-const ARI_USER = String(process.env.ARI_USER || '').trim();
-const ARI_PASSWORD = String(process.env.ARI_PASSWORD || '').trim();
-const ARI_APP = String(process.env.ARI_APP || 'dialer').trim() || 'dialer';
-const ARI_DIAL_PREFIX = String(process.env.ARI_DIAL_PREFIX || process.env.PJSIP_PREFIX || 'PJSIP/').trim() || 'PJSIP/';
-const ARI_CONNECT_RETRY_MS = Math.max(1000, parseInt(process.env.ARI_CONNECT_RETRY_MS || '3000', 10) || 3000);
-const ARI_PLAYBACK_HANGUP_DELAY_MS = Math.max(0, parseInt(process.env.ARI_PLAYBACK_HANGUP_DELAY_MS || '0', 10) || 0);
-const ARI_NUMBER_SUFFIX = (() => {
-  const raw = process.env.ARI_NUMBER_SUFFIX;
-  if (raw !== undefined) {
-    const trimmed = String(raw).trim();
-    return trimmed || '@switch';
-  }
-  return '@switch';
-})();
-const ARI_IS_CONFIGURED = Boolean(ARI_ENABLE && AriClient && ARI_HOST && ARI_USER && ARI_PASSWORD);
-const ARI_CHANNEL_POLL_INTERVAL_MS = Math.max(
-  0,
-  parseInt(process.env.ARI_CHANNEL_POLL_INTERVAL_MS || '1000', 10) || 0
-);
-const ARI_CHANNEL_POLL_HANGUP_GRACE_MS = Math.max(ARI_CHANNEL_POLL_INTERVAL_MS * 2, 2000);
-// Maximum time to wait for a single ARI channels.originate() HTTP call.
-// The ari-client library has no built-in timeout; without this, a slow/unresponsive
-// Asterisk server can block the dialer worker indefinitely per lead.
-const ARI_ORIGINATE_TIMEOUT_MS = Math.max(
-  3000,
-  parseInt(process.env.ARI_ORIGINATE_TIMEOUT_MS || '15000', 10) || 15000
-);
 
 const dialerLeadUpload = multer({
   storage: multer.memoryStorage(),
@@ -193,622 +164,9 @@ function joinUrl(base, p) {
   return b + s;
 }
 
-let ariClientInstance = null;
-let ariReady = false;
-let ariReconnectTimer = null;
-const ariCallCache = new Map();
-let ariChannelPollTimer = null;
-let ariChannelPollRunning = false;
-const ariPollerKnownChannels = new Map();
-let ariChannelPollLastSnapshot = { updatedAt: null, status: 'idle', calls: [] };
-
-function scheduleAriReconnect(reason) {
-  if (!ARI_IS_CONFIGURED) return;
-  if (ariReconnectTimer) return;
-  const waitMs = ARI_CONNECT_RETRY_MS;
-  if (DEBUG && reason) console.warn('[ari] scheduling reconnect:', reason);
-  ariReconnectTimer = setTimeout(() => {
-    ariReconnectTimer = null;
-    connectAri().catch((err) => {
-      console.error('[ari] reconnect failed:', err?.message || err);
-      scheduleAriReconnect('reconnect-error');
-    });
-  }, waitMs);
-}
-
+// ARI connection (delegated to AriService)
 function isAriDialerReady() {
-  return Boolean(ARI_IS_CONFIGURED && ariReady && ariClientInstance);
-}
-
-async function emitAriDialerEvent(channelId, eventPayload) {
-  if (!channelId) return;
-  try {
-    const state = getAriCallState(channelId);
-    // Use _dialerCallIdHint when the cache was already popped (e.g. from ChannelDestroyed)
-    const dialerCallId = state?.dialerCallId || eventPayload._dialerCallIdHint || null;
-    // Strip the internal hint before passing to applyDialerCallEvent
-    const { _dialerCallIdHint, ...cleanPayload } = eventPayload;
-    await applyDialerCallEvent(
-      {
-        callId: dialerCallId || channelId,
-        channelId,
-        uuid: channelId,
-        ...cleanPayload,
-        provider: 'ari',
-      },
-      { source: 'ari' }
-    );
-  } catch (err) {
-    if (DEBUG) console.warn('[ari] applyVoiceDialerEvent failed:', err?.message || err);
-  }
-}
-
-function trackAriCallState(channelId, key, value) {
-  if (!channelId) return;
-  const cached = ariCallCache.get(channelId) || {};
-  cached[key] = value;
-  ariCallCache.set(channelId, cached);
-  return cached;
-}
-
-function popAriCallState(channelId) {
-  if (!channelId) return {};
-  const cached = ariCallCache.get(channelId) || {};
-  ariCallCache.delete(channelId);
-  return cached;
-}
-
-function getAriCallState(channelId) {
-  if (!channelId) return null;
-  return ariCallCache.get(channelId) || null;
-}
-
-function startAriChannelPoller() {
-  if (!ARI_CHANNEL_POLL_INTERVAL_MS || ARI_CHANNEL_POLL_INTERVAL_MS <= 0) return;
-  if (ariChannelPollTimer || !isAriDialerReady()) return;
-  if (DEBUG) console.log(`[ari.poller] starting (interval=${ARI_CHANNEL_POLL_INTERVAL_MS}ms)`);
-  const tick = () => {
-    runAriChannelPollTick().catch((err) => {
-      if (DEBUG) console.warn('[ari.poller] tick failed:', err?.message || err);
-    });
-  };
-  ariChannelPollTimer = setInterval(tick, ARI_CHANNEL_POLL_INTERVAL_MS);
-  tick();
-}
-
-function stopAriChannelPoller(status = 'paused') {
-  if (ariChannelPollTimer) {
-    try { clearInterval(ariChannelPollTimer); } catch {}
-    ariChannelPollTimer = null;
-  }
-  ariChannelPollRunning = false;
-  ariPollerKnownChannels.clear();
-  ariChannelPollLastSnapshot = {
-    updatedAt: new Date().toISOString(),
-    status,
-    calls: []
-  };
-}
-
-function normalizeAriChannelState(raw) {
-  const value = String(raw || '').toLowerCase();
-  switch (value) {
-    case 'ring':
-    case 'ringing':
-      return 'ringing';
-    case 'dial':
-    case 'dialing':
-      return 'dialing';
-    case 'up':
-    case 'connected':
-      return 'answered';
-    case 'busy':
-      return 'busy';
-    case 'congestion':
-    case 'failed':
-      return 'failed';
-    case 'hangup':
-    case 'down':
-    case 'terminated':
-      return 'hangup';
-    default:
-      return value || 'unknown';
-  }
-}
-
-async function ensureDialerCallMetadataForChannel(channelId) {
-  if (!channelId || !pool) return null;
-  const cached = getAriCallState(channelId);
-  if (cached?.dialerCallId) {
-    return {
-      callId: cached.dialerCallId,
-      campaignId: cached.campaignId || null,
-      leadId: cached.leadId || null,
-      userId: cached.userId || null
-    };
-  }
-  try {
-    const [rows] = await pool.execute(
-      `SELECT call_id, campaign_id, lead_id, user_id
-         FROM dialer_call_logs
-        WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.voice.uuid')) = ?
-        ORDER BY id DESC
-        LIMIT 1`,
-      [channelId]
-    );
-    const row = rows && rows[0] ? rows[0] : null;
-    if (row) {
-      trackAriCallState(channelId, 'dialerCallId', row.call_id || null);
-      trackAriCallState(channelId, 'campaignId', Number(row.campaign_id) || null);
-      trackAriCallState(channelId, 'leadId', Number(row.lead_id) || null);
-      trackAriCallState(channelId, 'userId', Number(row.user_id) || null);
-      return {
-        callId: row.call_id || null,
-        campaignId: Number(row.campaign_id) || null,
-        leadId: Number(row.lead_id) || null,
-        userId: Number(row.user_id) || null
-      };
-    }
-  } catch (err) {
-    if (DEBUG) console.warn('[ari.poller] lookup failed:', err?.message || err);
-  }
-  return null;
-}
-
-async function cleanupStuckDialerStateOnStartup() {
-  if (!pool) return;
-  try {
-    const [logResult] = await pool.execute(
-      `UPDATE dialer_call_logs
-         SET status = 'error',
-             result = 'failed',
-             notes = CASE
-               WHEN notes IS NULL OR notes = '' THEN 'Reset after restart (missing ARI channel)'
-               ELSE notes
-             END
-       WHERE status IN ('queued','dialing','ringing')
-         AND created_at < (NOW() - INTERVAL 30 SECOND)`
-    );
-    const [leadResult] = await pool.execute(
-      `UPDATE dialer_leads
-          SET status = 'pending',
-              last_call_at = NULL
-        WHERE status IN ('queued','dialing')`
-    );
-    if (DEBUG) {
-      console.log('[dialer.cleanup] Reset stuck dialer state', {
-        callLogsUpdated: logResult?.affectedRows || 0,
-        leadsUpdated: leadResult?.affectedRows || 0
-      });
-    }
-  } catch (err) {
-    console.warn('[dialer.cleanup] Failed to reset stuck dialer state:', err?.message || err);
-  }
-}
-
-async function runAriChannelPollTick() {
-  if (ariChannelPollRunning) return;
-  if (!isAriDialerReady() || !ariClientInstance || !ariClientInstance.channels?.list) {
-    ariChannelPollLastSnapshot = {
-      updatedAt: new Date().toISOString(),
-      status: 'disconnected',
-      calls: []
-    };
-    return;
-  }
-  ariChannelPollRunning = true;
-  try {
-    const now = new Date();
-    let channels = [];
-    try {
-      channels = await ariClientInstance.channels.list();
-    } catch (err) {
-      if (DEBUG) console.warn('[ari.poller] list error:', err?.message || err);
-      ariChannelPollLastSnapshot = {
-        updatedAt: now.toISOString(),
-        status: 'error',
-        error: err?.message || String(err),
-        calls: []
-      };
-      return;
-    }
-    channels = Array.isArray(channels) ? channels : [];
-    const currentIds = new Set();
-    const liveCalls = [];
-    for (const channel of channels) {
-      const channelId = channel?.id ? String(channel.id) : '';
-      if (!channelId) continue;
-      currentIds.add(channelId);
-      const stateRaw = channel?.state || '';
-      const normalizedState = normalizeAriChannelState(stateRaw);
-      const cachedBefore = getAriCallState(channelId) || {};
-      const prevState = cachedBefore.pollState;
-      trackAriCallState(channelId, 'pollState', normalizedState);
-      trackAriCallState(channelId, 'lastSeenAt', now.getTime());
-
-      let dialerMeta = null;
-      if (cachedBefore.dialerCallId) {
-        dialerMeta = {
-          callId: cachedBefore.dialerCallId,
-          campaignId: cachedBefore.campaignId || null,
-          leadId: cachedBefore.leadId || null,
-          userId: cachedBefore.userId || null
-        };
-      } else {
-        dialerMeta = await ensureDialerCallMetadataForChannel(channelId);
-      }
-
-      if (normalizedState === 'ringing' && !(cachedBefore.ring instanceof Date)) {
-        trackAriCallState(channelId, 'ring', now);
-      }
-      if (normalizedState === 'answered' && !(cachedBefore.answer instanceof Date)) {
-        trackAriCallState(channelId, 'answer', now);
-      }
-
-      const stateChanged = prevState !== normalizedState;
-      if (stateChanged && ['ringing', 'answered', 'dialing'].includes(normalizedState)) {
-        const currentCache = getAriCallState(channelId) || {};
-        const eventPayload = {
-          event: normalizedState,
-          status: normalizedState,
-          channelState: stateRaw || null,
-          timestamp: now.toISOString()
-        };
-        if (currentCache.ring instanceof Date) {
-          eventPayload.ringTime = currentCache.ring.toISOString();
-        }
-        if (currentCache.answer instanceof Date) {
-          eventPayload.answerTime = currentCache.answer.toISOString();
-          eventPayload.durationSec = Math.max(
-            0,
-            Math.round((now.getTime() - currentCache.answer.getTime()) / 1000)
-          );
-        }
-        await emitAriDialerEvent(channelId, eventPayload);
-      }
-
-      const latestCache = getAriCallState(channelId) || {};
-      const durationSec =
-        latestCache.answer instanceof Date
-          ? Math.max(0, Math.round((now.getTime() - latestCache.answer.getTime()) / 1000))
-          : 0;
-
-      liveCalls.push({
-        channelId,
-        callId: latestCache.dialerCallId || dialerMeta?.callId || null,
-        campaignId: latestCache.campaignId || dialerMeta?.campaignId || null,
-        leadId: latestCache.leadId || dialerMeta?.leadId || null,
-        state: normalizedState,
-        fromNumber: channel?.caller?.number || null,
-        toNumber: channel?.connected?.number || channel?.dialplan?.exten || null,
-        ringTime: latestCache.ring instanceof Date ? latestCache.ring.toISOString() : null,
-        answerTime: latestCache.answer instanceof Date ? latestCache.answer.toISOString() : null,
-        durationSec,
-        createdAt: channel?.creationtime || null
-      });
-
-      ariPollerKnownChannels.set(channelId, {
-        dialerCallId: latestCache.dialerCallId || dialerMeta?.callId || null,
-        lastState: normalizedState,
-        lastSeenAt: now.getTime()
-      });
-    }
-
-    for (const [channelId, info] of Array.from(ariPollerKnownChannels.entries())) {
-      if (currentIds.has(channelId)) continue;
-      if (now.getTime() - info.lastSeenAt < ARI_CHANNEL_POLL_HANGUP_GRACE_MS) continue;
-      ariPollerKnownChannels.delete(channelId);
-      const cached = popAriCallState(channelId);
-      const durationSec =
-        cached?.answer instanceof Date
-          ? Math.max(0, Math.round((now.getTime() - cached.answer.getTime()) / 1000))
-          : null;
-      await emitAriDialerEvent(channelId, {
-        event: 'hangup',
-        status: 'hangup',
-        ringTime: cached?.ring instanceof Date ? cached.ring.toISOString() : null,
-        answerTime: cached?.answer instanceof Date ? cached.answer.toISOString() : null,
-        hangupTime: now.toISOString(),
-        durationSec,
-        timestamp: now.toISOString(),
-        source: 'ari-poller'
-      });
-    }
-
-    ariChannelPollLastSnapshot = {
-      updatedAt: now.toISOString(),
-      status: 'ok',
-      calls: liveCalls
-    };
-  } finally {
-    ariChannelPollRunning = false;
-  }
-}
-
-function connectAriClient() {
-  return new Promise((resolve, reject) => {
-    try {
-      const url = `http://${ARI_HOST}:${ARI_PORT}`;
-      AriClient.connect(url, ARI_USER, ARI_PASSWORD, (err, client) => {
-        if (err) return reject(err);
-        return resolve(client);
-      });
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-async function connectAri() {
-  if (!ARI_IS_CONFIGURED) {
-    if (ARI_ENABLE && !AriClient) {
-      console.warn('[ari] ARI_ENABLE=1 but ari-client dependency is unavailable.');
-    }
-    return;
-  }
-
-  try {
-    ariReady = false;
-    const client = await connectAriClient();
-    if (ariClientInstance && typeof ariClientInstance.removeAllListeners === 'function') {
-      try { ariClientInstance.removeAllListeners(); } catch {}
-    }
-    ariClientInstance = client;
-    registerAriEventHandlers(client);
-    client.start(ARI_APP);
-    ariReady = true;
-    console.log(`[ari] Connected to ${ARI_HOST}:${ARI_PORT} (app=${ARI_APP})`);
-    startAriChannelPoller();
-  } catch (err) {
-    ariReady = false;
-    console.error('[ari] connect error:', err?.message || err);
-    stopAriChannelPoller('disconnected');
-    scheduleAriReconnect('connect-error');
-  }
-}
-
-function registerAriEventHandlers(client) {
-  if (!client) return;
-  if (typeof client.removeAllListeners === 'function') {
-    client.removeAllListeners();
-  }
-
-  client.on('StasisStart', async (event) => {
-    const channelId = event?.channel?.id;
-    if (!channelId) return;
-    const now = new Date();
-    const cached = trackAriCallState(channelId, 'answer', now) || {};
-    const channelName = String(event?.channel?.name || '');
-
-    // Fallback: LINKEDID lookup.
-    // When Asterisk routes an ARI-originated call through a LOCAL channel pair, the channel
-    // that enters Stasis (Channel B) has a different ID from the one returned by originate() (Channel A).
-    // But Channel B's linkedid is Channel A's ID, which we have in our cache.
-    if (!cached.dialerCallId) {
-      try {
-        const linkedIdResp = await axios.get(
-          `http://${ARI_HOST}:${ARI_PORT}/ari/channels/${encodeURIComponent(channelId)}/variable`,
-          {
-            params: { variable: 'CHANNEL(linkedid)' },
-            auth: { username: ARI_USER, password: ARI_PASSWORD },
-            timeout: 3000
-          }
-        );
-        const linkedId = linkedIdResp?.data?.value ? String(linkedIdResp.data.value).trim() : null;
-        if (linkedId && linkedId !== channelId) {
-          const linkedState = getAriCallState(linkedId);
-          if (linkedState?.dialerCallId) {
-            trackAriCallState(channelId, 'dialerCallId', linkedState.dialerCallId);
-            trackAriCallState(channelId, 'campaignId', linkedState.campaignId || null);
-            trackAriCallState(channelId, 'leadId', linkedState.leadId || null);
-            trackAriCallState(channelId, 'userId', linkedState.userId || null);
-            cached.dialerCallId = linkedState.dialerCallId;
-            if (DEBUG) console.log('[ari.stasis] linked via LINKEDID', { channelId, linkedId, dialerCallId: linkedState.dialerCallId });
-          }
-        }
-      } catch (e) {
-        if (DEBUG) console.warn('[ari.stasis] LINKEDID lookup failed:', e?.message || e);
-      }
-    }
-
-    // Fallback 2: LOCAL channel pair name matching.
-    // For LOCAL channel pairs, the originate() channel name ends with ";1" or ";2".
-    // The counterpart (stored in ariCallCache with channelName) can be found by swapping the suffix.
-    if (!cached.dialerCallId && channelName) {
-      let counterpartName = null;
-      if (channelName.endsWith(';2')) counterpartName = channelName.slice(0, -2) + ';1';
-      else if (channelName.endsWith(';1')) counterpartName = channelName.slice(0, -2) + ';2';
-      if (counterpartName) {
-        for (const [, cstate] of ariCallCache.entries()) {
-          if (cstate.channelName === counterpartName && cstate.dialerCallId) {
-            trackAriCallState(channelId, 'dialerCallId', cstate.dialerCallId);
-            trackAriCallState(channelId, 'campaignId', cstate.campaignId || null);
-            trackAriCallState(channelId, 'leadId', cstate.leadId || null);
-            trackAriCallState(channelId, 'userId', cstate.userId || null);
-            cached.dialerCallId = cstate.dialerCallId;
-            if (DEBUG) console.log('[ari.stasis] linked via channel name pair', { channelId, channelName, counterpartName, dialerCallId: cstate.dialerCallId });
-            break;
-          }
-        }
-      }
-    }
-
-    if (DEBUG) console.log('[ari.stasis] start', {
-      channelId,
-      channelName,
-      dialerCallId: cached?.dialerCallId || null,
-      callerNum: event?.channel?.caller?.number || null,
-      connectedNum: event?.channel?.connected?.number || null,
-    });
-
-    if (!cached.answeredEventEmitted) {
-      cached.answeredEventEmitted = true;
-      ariCallCache.set(channelId, cached);
-      await emitAriDialerEvent(channelId, {
-        event: 'answered',
-        status: 'answered',
-        ringTime: cached?.ring ? cached.ring.toISOString() : null,
-        answerTime: now.toISOString(),
-        timestamp: now.toISOString(),
-      });
-    }
-    trackAriCallState(channelId, 'stasisStart', now);
-
-    const audio = (event?.args && event.args[0]) || event?.channel?.variables?.audio_url || '';
-    if (audio) {
-      try {
-        await client.channels.answer({ channelId });
-      } catch (err) {
-        if (DEBUG) console.warn('[ari] answer error:', err?.message || err);
-      }
-      try {
-        const playback = await client.channels.play({ channelId, media: audio });
-        playback.once('PlaybackFinished', () => {
-          setTimeout(() => {
-            client.channels.hangup({ channelId }).catch((err) => {
-              // "Channel not found" is a benign race: channel already cleaned up before hangup fired.
-              const msg = String(err?.message || err || '');
-              if (DEBUG && !msg.includes('Channel not found')) {
-                console.warn('[ari] hangup error:', err?.message || err);
-              }
-            });
-          }, ARI_PLAYBACK_HANGUP_DELAY_MS);
-        });
-      } catch (err) {
-        if (DEBUG) console.warn('[ari] playback error:', err?.message || err);
-        client.channels.hangup({ channelId }).catch(() => {});
-      }
-    }
-  });
-
-  client.on('ChannelStateChange', async (event) => {
-    const channelId = event?.channel?.id;
-    if (!channelId) return;
-    const state = event?.channel?.state;
-    if (state === 'Ringing') {
-      const now = new Date();
-      trackAriCallState(channelId, 'ring', now);
-      await emitAriDialerEvent(channelId, {
-        event: 'ringing',
-        status: 'ringing',
-        ringTime: now.toISOString(),
-        timestamp: now.toISOString(),
-      });
-      return;
-    }
-    if (state === 'Up') {
-      const now = new Date();
-      const cached = trackAriCallState(channelId, 'answer', now) || {};
-      if (cached.answeredEventEmitted) return;
-      cached.answeredEventEmitted = true;
-      ariCallCache.set(channelId, cached);
-      await emitAriDialerEvent(channelId, {
-        event: 'answered',
-        status: 'answered',
-        ringTime: cached?.ring ? cached.ring.toISOString() : null,
-        answerTime: now.toISOString(),
-        timestamp: now.toISOString(),
-      });
-    }
-  });
-
-  client.on('ChannelDestroyed', async (event) => {
-    const channelId = event?.channel?.id;
-    if (!channelId) return;
-    const now = new Date();
-    const cached = popAriCallState(channelId);
-    const durationSec =
-      cached?.answer instanceof Date ? Math.max(0, Math.round((now.getTime() - cached.answer.getTime()) / 1000)) : null;
-    const causeText = String(event?.cause_txt || event?.cause || '').toUpperCase();
-    if (DEBUG) console.log('[ari.hangup]', {
-      channelId,
-      channelName: event?.channel?.name || null,
-      dialerCallId: cached?.dialerCallId || null,
-      hasAnswer: cached?.answer instanceof Date,
-      durationSec,
-      cause: causeText || null,
-    });
-    let result = null;
-    if (cached?.answer instanceof Date) {
-      result = 'completed';
-    } else if (causeText.includes('NO ANSWER')) {
-      result = 'no-answer';
-    } else if (causeText.includes('BUSY')) {
-      result = 'busy';
-    } else if (causeText.includes('CANCEL')) {
-      result = 'cancelled';
-    } else if (causeText.includes('CONGESTION')) {
-      result = 'failed';
-    }
-    await emitAriDialerEvent(channelId, {
-      event: 'hangup',
-      status: 'hangup',
-      result,
-      ringTime: cached?.ring ? cached.ring.toISOString() : null,
-      answerTime: cached?.answer ? cached.answer.toISOString() : null,
-      hangupTime: now.toISOString(),
-      durationSec,
-      timestamp: now.toISOString(),
-      // Preserve dialerCallId from the popped cache so emitAriDialerEvent can still
-      // resolve the correct call log even after the cache entry is gone.
-      _dialerCallIdHint: cached?.dialerCallId || null,
-    });
-  });
-
-  client.on('error', (err) => {
-    console.error('[ari] client error:', err?.message || err);
-    ariReady = false;
-    stopAriChannelPoller('disconnected');
-    scheduleAriReconnect('client-error');
-  });
-}
-
-async function originateAriCall({ toNumber, fromNumber, audioUrl }) {
-  if (!isAriDialerReady()) {
-    throw new Error('ARI not connected');
-  }
-  if (!toNumber || !fromNumber || !audioUrl) {
-    throw new Error('Missing ARI originate parameters');
-  }
-  const endpoint = `${ARI_DIAL_PREFIX}${toNumber}`;
-  // Race the originate HTTP call against a timeout so a slow/hung Asterisk response
-  // cannot block the dialer worker indefinitely.
-  let _timeoutHandle;
-  const timeoutPromise = new Promise((_, reject) => {
-    _timeoutHandle = setTimeout(() => reject(new Error('ARI originate timeout')), ARI_ORIGINATE_TIMEOUT_MS);
-  });
-  try {
-    const channel = await Promise.race([
-      ariClientInstance.channels.originate({
-        endpoint,
-        callerId: fromNumber,
-        app: ARI_APP,
-        appArgs: audioUrl,
-        variables: { audio_url: audioUrl }
-      }),
-      timeoutPromise
-    ]);
-    return { channelId: channel?.id || null, channelName: channel?.name || null };
-  } finally {
-    clearTimeout(_timeoutHandle);
-  }
-}
-
-if (ARI_IS_CONFIGURED) {
-  connectAri().catch((err) => {
-    console.error('[ari] initial connect failed:', err?.message || err);
-    scheduleAriReconnect('initial-connect-error');
-  });
-} else if (ARI_ENABLE) {
-  console.warn('[ari] ARI_ENABLE=1 but host/user/password/app settings are incomplete; falling back to HTTP Voice API.');
-}
-
-function applyDialerNumberSuffix(raw, overrideSuffix) {
-  const base = String(raw || '').trim();
-  if (!base) return '';
-  const suffix = overrideSuffix !== undefined ? String(overrideSuffix || '').trim() : ARI_NUMBER_SUFFIX;
-  if (!suffix) return base;
-  return base.endsWith(suffix) ? base : `${base}${suffix}`;
+  return AriService.isConnected;
 }
 function digitsOnly(s) {
   return String(s || '').replace(/[^0-9]/g, '');
@@ -11400,9 +10758,6 @@ async function startDialerLeadCall({ campaign, lead }) {
     if (DEBUG) console.warn('[dialer.worker] Failed to insert call log row:', e?.message || e);
   }
 
-  const dialerFrom = callerId;
-  const ariDestination = applyDialerNumberSuffix(phoneNumber, ARI_NUMBER_SUFFIX);
-
   const markLeadFailed = async (message) => {
     try {
       await pool.execute(
@@ -11418,7 +10773,7 @@ async function startDialerLeadCall({ campaign, lead }) {
     } catch {}
   };
 
-  if (!isAriDialerReady()) {
+  if (!AriService.isConnected) {
     await markLeadFailed('ARI not connected');
     return { ok: false };
   }
@@ -11426,10 +10781,15 @@ async function startDialerLeadCall({ campaign, lead }) {
   let providerUuid = null;
   let providerChannelName = null;
   try {
-    const ariResp = await originateAriCall({
-      toNumber: ariDestination,
-      fromNumber: dialerFrom,
-      audioUrl
+    // AriService.originateCall handles number suffix, endpoint prefix, and caches call state
+    const ariResp = await AriService.originateCall({
+      toNumber: phoneNumber,
+      fromNumber: callerId,
+      audioUrl,
+      campaignId,
+      leadId,
+      userId,
+      callId
     });
     providerUuid = ariResp?.channelId || null;
     providerChannelName = ariResp?.channelName || null;
@@ -11441,13 +10801,6 @@ async function startDialerLeadCall({ campaign, lead }) {
   }
 
   if (providerUuid) {
-    try {
-      trackAriCallState(providerUuid, 'dialerCallId', callId);
-      trackAriCallState(providerUuid, 'campaignId', campaignId);
-      trackAriCallState(providerUuid, 'leadId', leadId);
-      trackAriCallState(providerUuid, 'userId', userId);
-      if (providerChannelName) trackAriCallState(providerUuid, 'channelName', providerChannelName);
-    } catch {}
     try {
       await pool.execute(
         `UPDATE dialer_call_logs
@@ -18403,15 +17756,15 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
   }
   if (!callRow && callId) {
     try {
-      const mapped = await ensureDialerCallMetadataForChannel(callId);
-      if (mapped?.callId) {
+      const cached = AriService.getCallCache(callId);
+      if (cached?.dialerCallId) {
         const [rowsViaMapped] = await pool.execute(
           'SELECT id, campaign_id, lead_id, user_id, metadata, call_id FROM dialer_call_logs WHERE call_id = ? LIMIT 1',
-          [mapped.callId]
+          [cached.dialerCallId]
         );
         callRow = rowsViaMapped && rowsViaMapped[0] ? rowsViaMapped[0] : null;
         if (!callRow) {
-          callId = mapped.callId;
+          callId = cached.dialerCallId;
         }
       }
     } catch (e) {
@@ -18431,7 +17784,7 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
   const channelIdFromEvent = String(body.channelId || body.channel_id || '').trim();
   if (channelIdFromEvent) {
     try {
-      trackAriCallState(channelIdFromEvent, 'dialerCallId', storedCallId);
+      AriService.updateCallCache(channelIdFromEvent, { dialerCallId: storedCallId });
     } catch {}
   }
 
@@ -19054,7 +18407,8 @@ app.post('/webhooks/daily/events', async (req, res) => {
     if (DAILY_DIALIN_WEBHOOK_TOKEN) {
       const token = String(req.query.token || '').trim();
       if (!token || token !== DAILY_DIALIN_WEBHOOK_TOKEN) {
-        if (DEBUG) console.warn('[daily.webhook] Invalid token');
+  if (DEBUG) console.log('[db] Pool created.');
+  AriService.init(pool);
         return res.status(403).json({ success: false, message: 'Forbidden' });
       }
     }
