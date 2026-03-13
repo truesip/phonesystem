@@ -4297,12 +4297,16 @@ function parseDialerAudioMetadata(row) {
 
 function resolvePlaybackUriFromRow(row) {
   if (!row) return '';
-  if (row.playback_uri) return row.playback_uri;
-  const meta = parseDialerAudioMetadata(row);
-  if (meta && typeof meta === 'object') {
-    return meta.playbackUri || meta.playback_uri || meta.uri || meta.url || '';
+  let raw = '';
+  if (row.playback_uri) {
+    raw = row.playback_uri;
+  } else {
+    const meta = parseDialerAudioMetadata(row);
+    if (meta && typeof meta === 'object') {
+      raw = meta.playbackUri || meta.playback_uri || meta.uri || meta.url || '';
+    }
   }
-  return '';
+  return normalizeDialerAudioUrl(raw);
 }
 
 
@@ -4323,6 +4327,34 @@ function buildPublicMediaUrl(fileName, req) {
 function buildSoundPlaybackUri(fileName, req) {
   const mediaUrl = buildPublicMediaUrl(fileName, req);
   return mediaUrl ? `sound:${mediaUrl}` : '';
+}
+
+/**
+ * Rewrites a stored audio playback URI to use the current PUBLIC_BASE_URL.
+ * Handles both `sound:https://...` and bare `https://...` forms.
+ * Extracts the filename from the /media/<filename> segment and rebuilds.
+ * This corrects stale URLs stored when the server ran under a different domain.
+ */
+function normalizeDialerAudioUrl(uri) {
+  if (!uri) return '';
+  const baseEnv = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/$/, '');
+  if (!baseEnv) return uri;
+
+  const hasSoundPrefix = uri.startsWith('sound:');
+  const httpPart = hasSoundPrefix ? uri.slice(6) : uri;
+
+  try {
+    const u = new URL(httpPart);
+    const segments = u.pathname.split('/');
+    const mediaIdx = segments.indexOf('media');
+    if (mediaIdx >= 0 && segments[mediaIdx + 1]) {
+      const fileName = segments[mediaIdx + 1];
+      const newHttpUrl = `${baseEnv}/media/${fileName}`;
+      return hasSoundPrefix ? `sound:${newHttpUrl}` : newHttpUrl;
+    }
+  } catch {}
+
+  return uri;
 }
 
 async function convertBufferTo8kMonoWav(buffer) {
@@ -10711,7 +10743,7 @@ async function startDialerLeadCall({ campaign, lead }) {
   const userId = Number(campaign.user_id);
   const leadId = Number(lead.id);
   const callerId = normalizeDialerCallerId(campaign.caller_id);
-  const audioUrl = String(campaign.audio_playback_uri || '').trim();
+  const audioUrl = normalizeDialerAudioUrl(String(campaign.audio_playback_uri || '').trim());
   const phoneNumber = String(lead.phone_number || '').trim();
 
   if (!phoneNumber || !callerId || !audioUrl) {

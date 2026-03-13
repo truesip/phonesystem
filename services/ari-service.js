@@ -114,7 +114,7 @@ class AriService {
       call_id: String(callId)
     };
 
-    console.log(`[ari-service] Originating call to ${endpoint} from ${fromNumber}`);
+    console.log(`[ari-service] Originating call to ${endpoint} from ${fromNumber} audio=${audioUrl}`);
 
     // Set a timeout for origination
     let timeoutHandle;
@@ -143,6 +143,7 @@ class AriService {
           campaignId,
           leadId,
           userId,
+          audioUrl,
           status: 'dialing',
           startTime: new Date()
         });
