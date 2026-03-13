@@ -2991,7 +2991,8 @@ async function initDb() {
     { name: 'price', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN price DECIMAL(18,8) NULL' },
     { name: 'billed', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN billed TINYINT(1) NOT NULL DEFAULT 0' },
     { name: 'billing_history_id', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN billing_history_id BIGINT NULL' },
-    { name: 'pipecat_session_id', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN pipecat_session_id VARCHAR(128) NULL AFTER call_id' }
+    { name: 'pipecat_session_id', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN pipecat_session_id VARCHAR(128) NULL AFTER call_id' },
+    { name: 'updated_at', ddl: 'ALTER TABLE dialer_call_logs ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' }
   ]) {
     try {
       const [rows] = await pool.query(
@@ -10870,6 +10871,80 @@ app.delete('/api/me/dialer/campaigns/:campaignId', requireAuth, async (req, res)
   }
 });
 
+// Update campaign settings (name, caller_id, audio, concurrency).
+// Allowed at any time; running campaigns will pick up changes on the next worker tick.
+app.patch('/api/me/dialer/campaigns/:campaignId', requireAuth, async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
+    const userId = req.session.userId;
+    const campaignId = Number(req.params.campaignId || 0);
+    if (!campaignId) return res.status(400).json({ success: false, message: 'Invalid campaign id' });
+    const campaign = await fetchDialerCampaignById({ userId, campaignId });
+    if (!campaign) return res.status(404).json({ success: false, message: 'Campaign not found' });
+
+    const fields = [];
+    const values = [];
+
+    const nameRaw = req.body?.name != null ? String(req.body.name).trim().slice(0, 191) : null;
+    if (nameRaw !== null) {
+      if (!nameRaw) return res.status(400).json({ success: false, message: 'Campaign name cannot be empty' });
+      fields.push('name = ?'); values.push(nameRaw);
+    }
+
+    const callerIdRaw = req.body?.caller_id != null ? String(req.body.caller_id || req.body.callerId || '').trim() : null;
+    if (callerIdRaw !== null) {
+      const callerId = normalizeDialerCallerId(callerIdRaw);
+      if (!callerId) return res.status(400).json({ success: false, message: 'Caller ID is invalid. Use E.164 like +15551234567 or a SIP URI.' });
+      fields.push('caller_id = ?'); values.push(callerId);
+    }
+
+    const audioNameRaw = req.body?.audio_recording_name != null
+      ? String(req.body.audio_recording_name || req.body.audioRecordingName || '').trim().slice(0, 191)
+      : null;
+    if (audioNameRaw !== null) {
+      let audioPlaybackUri = String(req.body?.audio_playback_uri || req.body?.audioPlaybackUri || '').trim().slice(0, 255);
+      if (audioNameRaw) {
+        const audioRecordRow = await getDialerAudioRecordingForUser({ userId, recordingName: audioNameRaw });
+        if (!audioRecordRow) {
+          return res.status(400).json({ success: false, message: 'Selected audio recording not found' });
+        }
+        audioPlaybackUri = resolvePlaybackUriFromRow(audioRecordRow) || audioPlaybackUri;
+        if (!audioPlaybackUri) {
+          return res.status(400).json({ success: false, message: 'Selected audio recording is missing a playback URL. Please re-upload the file.' });
+        }
+      }
+      fields.push('audio_recording_name = ?'); values.push(audioNameRaw || null);
+      if (audioPlaybackUri) { fields.push('audio_playback_uri = ?'); values.push(audioPlaybackUri); }
+    }
+
+    const concurrencyRaw = req.body?.concurrency_limit ?? req.body?.concurrencyLimit;
+    if (concurrencyRaw != null) {
+      const concurrency = clampDialerConcurrencyLimit(parseInt(String(concurrencyRaw), 10));
+      fields.push('concurrency_limit = ?'); values.push(concurrency);
+    }
+
+    if (!fields.length) {
+      return res.status(400).json({ success: false, message: 'No updatable fields provided' });
+    }
+
+    fields.push('updated_at = NOW()');
+    values.push(campaignId, userId);
+
+    await pool.execute(
+      `UPDATE dialer_campaigns SET ${fields.join(', ')} WHERE id = ? AND user_id = ?`,
+      values
+    );
+
+    const updated = await fetchDialerCampaignById({ userId, campaignId });
+    const hydrated = await hydrateDialerCampaignRows(userId, updated ? [updated] : []);
+    const payload = hydrated.length ? serializeDialerCampaign(hydrated[0]) : null;
+    return res.json({ success: true, data: payload });
+  } catch (e) {
+    if (DEBUG) console.error('[dialer.campaigns.update] error:', e?.message || e);
+    return res.status(500).json({ success: false, message: e?.message || 'Failed to update campaign' });
+  }
+});
+
 app.get('/api/me/dialer/campaigns/:campaignId/leads', requireAuth, async (req, res) => {
   try {
     if (!pool) return res.status(500).json({ success: false, message: 'Database not configured' });
@@ -11561,11 +11636,40 @@ async function runDialerWorkerTick() {
         if (DIALER_GLOBAL_MAX_DIALOUT > 0) {
           globalInProgress += 1;
         }
-        await startDialerLeadCall({ campaign: c, lead });
+          await startDialerLeadCall({ campaign: c, lead });
+        }
       }
-    }
-  } catch (e) {
-    if (DEBUG) console.warn('[dialer.worker] tick error:', e?.message || e);
+
+      // Auto-complete campaigns that have no remaining pending/queued/dialing leads.
+      if (campaignIds.length) {
+        try {
+          const [activeLeadCounts] = await pool.query(
+            `SELECT campaign_id, COUNT(*) AS cnt
+             FROM dialer_leads
+             WHERE campaign_id IN (?) AND status IN ('pending','queued','dialing')
+             GROUP BY campaign_id`,
+            [campaignIds]
+          );
+          const activeByCampaign = new Map();
+          for (const r of activeLeadCounts || []) {
+            activeByCampaign.set(Number(r.campaign_id), Number(r.cnt || 0));
+          }
+          const toComplete = campaignIds.filter(cid => !activeByCampaign.has(cid) || activeByCampaign.get(cid) === 0);
+          if (toComplete.length) {
+            await pool.query(
+              `UPDATE dialer_campaigns
+               SET status = 'completed', updated_at = NOW()
+               WHERE id IN (?) AND status = 'running'`,
+              [toComplete]
+            );
+            if (DEBUG) console.log('[dialer.worker] Auto-completed campaigns with no remaining leads:', toComplete);
+          }
+        } catch (e) {
+          if (DEBUG) console.warn('[dialer.worker] Auto-complete check failed:', e?.message || e);
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[dialer.worker] tick error:', e?.message || e);
   } finally {
     dialerWorkerRunning = false;
     if (lockConn) {
@@ -18245,7 +18349,8 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
        SET status = ?, result = COALESCE(NULLIF(?, ''), result),
            duration_sec = COALESCE(?, duration_sec),
            price = COALESCE(?, price),
-           metadata = ?
+           metadata = ?,
+           updated_at = NOW()
      WHERE id = ?
      LIMIT 1`,
     [callStatus, callResult || null, durationValue, priceValue, metadataJson, callRowId]
@@ -18288,6 +18393,25 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
   try {
     requestDialerWorkerTick({ reason: `ari-event:${source}`, immediate: true });
   } catch {}
+
+  // Bill completed outbound dialer call inline on hangup (ARI path).
+  // Mirrors the Pipecat webhook path. chargeDialerOutboundCallLog is idempotent.
+  if (eventRaw === 'hangup') {
+    try {
+      const userId = callRow.user_id ? Number(callRow.user_id) : null;
+      if (userId) {
+        const chargeDesc = `Auto Dialer outbound call – ${storedCallId}`.slice(0, 255);
+        await chargeDialerOutboundCallLog({
+          dialerCallLogId: callRowId,
+          userId,
+          amount: priceValue || 0,
+          description: chargeDesc
+        });
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[voice.events] Failed to charge dialer call on hangup:', e?.message || e);
+    }
+  }
 
   return { status: 200, success: true, callId: storedCallId, campaignId, leadId };
 }
@@ -20786,7 +20910,7 @@ async function billUnchargedDialerOutboundCallsForUser({ localUserId, limit = 20
        WHERE l.user_id = ?
          AND COALESCE(l.duration_sec, 0) > 0
          AND l.billed = 0
-         AND l.status IN ('completed','connected')
+         AND l.status IN ('completed','connected','hangup')
          AND (l.result IS NULL OR l.result <> 'failed')
        ORDER BY l.created_at ASC, l.id ASC
        LIMIT ${safeLimit}`,
