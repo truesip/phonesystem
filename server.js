@@ -18135,6 +18135,23 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
       if (DEBUG) console.warn('[voice.events] fallback lookup failed:', e?.message || e);
     }
   }
+  if (!callRow && callId) {
+    try {
+      const mapped = await ensureDialerCallMetadataForChannel(callId);
+      if (mapped?.callId) {
+        const [rowsViaMapped] = await pool.execute(
+          'SELECT id, campaign_id, lead_id, user_id, metadata, call_id FROM dialer_call_logs WHERE call_id = ? LIMIT 1',
+          [mapped.callId]
+        );
+        callRow = rowsViaMapped && rowsViaMapped[0] ? rowsViaMapped[0] : null;
+        if (!callRow) {
+          callId = mapped.callId;
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.warn('[voice.events] mapped lookup failed:', e?.message || e);
+    }
+  }
   if (!callRow) {
     if (DEBUG) console.warn('[voice.events] call identifier not found', { source, callId });
     return { status: 202, ignored: true };
