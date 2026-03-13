@@ -333,9 +333,9 @@ class AriService {
       try {
           await this.pool.execute(
               `UPDATE dialer_call_logs 
-               SET status = ?, duration_sec = ?, billsec = ?, time_end = ?, result = ?
+               SET status = ?, duration_sec = ?, time_end = ?, result = ?
                WHERE call_id = ? LIMIT 1`,
-              [status, duration, duration, endTime, cause, callId]
+              [status, duration, endTime, cause, callId]
           );
 
           // Update lead status
