@@ -4350,6 +4350,10 @@ function normalizeDialerAudioUrl(uri) {
     if (mediaIdx >= 0 && segments[mediaIdx + 1]) {
       const fileName = segments[mediaIdx + 1];
       const newHttpUrl = `${baseEnv}/media/${fileName}`;
+      // ARI typically needs 'sound:' prefix for file-like playback, even for URLs (if supported by modules)
+      // We preserve it if it was there, or add it if missing?
+      // Actually, let's preserve the prefix preference of the existing data, 
+      // but usually for ARI we WANT sound: prefix if we rely on file playback.
       return hasSoundPrefix ? `sound:${newHttpUrl}` : newHttpUrl;
     }
   } catch {}
@@ -4369,7 +4373,7 @@ async function convertBufferTo8kMonoWav(buffer) {
       '-i', inPath,
       '-ar', '8000',
       '-ac', '1',
-      '-sample_fmt', 's16',
+      '-c:a', 'pcm_s16le',
       '-vn',
       outPath
     ]);
@@ -4486,6 +4490,7 @@ app.get('/media/:name', async (req, res) => {
     const rawName = String(req.params.name || '').trim();
     if (!rawName) return res.status(404).send('not found');
     const sanitized = rawName.replace(/[^a-zA-Z0-9._-]/g, '');
+    if (DEBUG) console.log(`[media] Request for audio: ${sanitized}`);
     if (!sanitized) return res.status(404).send('not found');
     const row = await fetchLocalDialerAudioFile(sanitized);
     if (!row) return res.status(404).send('not found');
