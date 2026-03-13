@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const ffmpegPath = require('ffmpeg-static');
 const { execFile } = require('child_process');
 const util = require('util');
 const execFileAsync = util.promisify(execFile);
@@ -4372,7 +4373,7 @@ async function convertBufferTo8kMonoWav(buffer) {
   const outPath = path.join(tmpDir, `dialer_audio_out_${id}.wav`);
   await fs.promises.writeFile(inPath, buffer);
   try {
-    await execFileAsync('ffmpeg', [
+    await execFileAsync(ffmpegPath, [
       '-y',
       '-i', inPath,
       '-ar', '8000',
