@@ -355,16 +355,14 @@ async function cleanupStuckDialerStateOnStartup() {
              notes = CASE
                WHEN notes IS NULL OR notes = '' THEN 'Reset after restart (missing ARI channel)'
                ELSE notes
-             END,
-             updated_at = NOW()
+             END
        WHERE status IN ('queued','dialing','ringing')
          AND created_at < (NOW() - INTERVAL 30 SECOND)`
     );
     const [leadResult] = await pool.execute(
       `UPDATE dialer_leads
           SET status = 'pending',
-              last_call_at = NULL,
-              updated_at = NOW()
+              last_call_at = NULL
         WHERE status IN ('queued','dialing')`
     );
     if (DEBUG) {
