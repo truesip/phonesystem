@@ -224,13 +224,16 @@ async function emitAriDialerEvent(channelId, eventPayload) {
   if (!channelId) return;
   try {
     const state = getAriCallState(channelId);
-    const dialerCallId = state?.dialerCallId;
+    // Use _dialerCallIdHint when the cache was already popped (e.g. from ChannelDestroyed)
+    const dialerCallId = state?.dialerCallId || eventPayload._dialerCallIdHint || null;
+    // Strip the internal hint before passing to applyDialerCallEvent
+    const { _dialerCallIdHint, ...cleanPayload } = eventPayload;
     await applyDialerCallEvent(
       {
         callId: dialerCallId || channelId,
         channelId,
         uuid: channelId,
-        ...eventPayload,
+        ...cleanPayload,
         provider: 'ari',
       },
       { source: 'ari' }
@@ -575,6 +578,69 @@ function registerAriEventHandlers(client) {
     if (!channelId) return;
     const now = new Date();
     const cached = trackAriCallState(channelId, 'answer', now) || {};
+    const channelName = String(event?.channel?.name || '');
+
+    // Fallback: LINKEDID lookup.
+    // When Asterisk routes an ARI-originated call through a LOCAL channel pair, the channel
+    // that enters Stasis (Channel B) has a different ID from the one returned by originate() (Channel A).
+    // But Channel B's linkedid is Channel A's ID, which we have in our cache.
+    if (!cached.dialerCallId) {
+      try {
+        const linkedIdResp = await axios.get(
+          `http://${ARI_HOST}:${ARI_PORT}/ari/channels/${encodeURIComponent(channelId)}/variable`,
+          {
+            params: { variable: 'CHANNEL(linkedid)' },
+            auth: { username: ARI_USER, password: ARI_PASSWORD },
+            timeout: 3000
+          }
+        );
+        const linkedId = linkedIdResp?.data?.value ? String(linkedIdResp.data.value).trim() : null;
+        if (linkedId && linkedId !== channelId) {
+          const linkedState = getAriCallState(linkedId);
+          if (linkedState?.dialerCallId) {
+            trackAriCallState(channelId, 'dialerCallId', linkedState.dialerCallId);
+            trackAriCallState(channelId, 'campaignId', linkedState.campaignId || null);
+            trackAriCallState(channelId, 'leadId', linkedState.leadId || null);
+            trackAriCallState(channelId, 'userId', linkedState.userId || null);
+            cached.dialerCallId = linkedState.dialerCallId;
+            if (DEBUG) console.log('[ari.stasis] linked via LINKEDID', { channelId, linkedId, dialerCallId: linkedState.dialerCallId });
+          }
+        }
+      } catch (e) {
+        if (DEBUG) console.warn('[ari.stasis] LINKEDID lookup failed:', e?.message || e);
+      }
+    }
+
+    // Fallback 2: LOCAL channel pair name matching.
+    // For LOCAL channel pairs, the originate() channel name ends with ";1" or ";2".
+    // The counterpart (stored in ariCallCache with channelName) can be found by swapping the suffix.
+    if (!cached.dialerCallId && channelName) {
+      let counterpartName = null;
+      if (channelName.endsWith(';2')) counterpartName = channelName.slice(0, -2) + ';1';
+      else if (channelName.endsWith(';1')) counterpartName = channelName.slice(0, -2) + ';2';
+      if (counterpartName) {
+        for (const [, cstate] of ariCallCache.entries()) {
+          if (cstate.channelName === counterpartName && cstate.dialerCallId) {
+            trackAriCallState(channelId, 'dialerCallId', cstate.dialerCallId);
+            trackAriCallState(channelId, 'campaignId', cstate.campaignId || null);
+            trackAriCallState(channelId, 'leadId', cstate.leadId || null);
+            trackAriCallState(channelId, 'userId', cstate.userId || null);
+            cached.dialerCallId = cstate.dialerCallId;
+            if (DEBUG) console.log('[ari.stasis] linked via channel name pair', { channelId, channelName, counterpartName, dialerCallId: cstate.dialerCallId });
+            break;
+          }
+        }
+      }
+    }
+
+    if (DEBUG) console.log('[ari.stasis] start', {
+      channelId,
+      channelName,
+      dialerCallId: cached?.dialerCallId || null,
+      callerNum: event?.channel?.caller?.number || null,
+      connectedNum: event?.channel?.connected?.number || null,
+    });
+
     if (!cached.answeredEventEmitted) {
       cached.answeredEventEmitted = true;
       ariCallCache.set(channelId, cached);
@@ -654,6 +720,14 @@ function registerAriEventHandlers(client) {
     const durationSec =
       cached?.answer instanceof Date ? Math.max(0, Math.round((now.getTime() - cached.answer.getTime()) / 1000)) : null;
     const causeText = String(event?.cause_txt || event?.cause || '').toUpperCase();
+    if (DEBUG) console.log('[ari.hangup]', {
+      channelId,
+      channelName: event?.channel?.name || null,
+      dialerCallId: cached?.dialerCallId || null,
+      hasAnswer: cached?.answer instanceof Date,
+      durationSec,
+      cause: causeText || null,
+    });
     let result = null;
     if (cached?.answer instanceof Date) {
       result = 'completed';
@@ -675,6 +749,9 @@ function registerAriEventHandlers(client) {
       hangupTime: now.toISOString(),
       durationSec,
       timestamp: now.toISOString(),
+      // Preserve dialerCallId from the popped cache so emitAriDialerEvent can still
+      // resolve the correct call log even after the cache entry is gone.
+      _dialerCallIdHint: cached?.dialerCallId || null,
     });
   });
 
@@ -711,7 +788,7 @@ async function originateAriCall({ toNumber, fromNumber, audioUrl }) {
       }),
       timeoutPromise
     ]);
-    return { channelId: channel?.id || null };
+    return { channelId: channel?.id || null, channelName: channel?.name || null };
   } finally {
     clearTimeout(_timeoutHandle);
   }
@@ -11347,6 +11424,7 @@ async function startDialerLeadCall({ campaign, lead }) {
   }
 
   let providerUuid = null;
+  let providerChannelName = null;
   try {
     const ariResp = await originateAriCall({
       toNumber: ariDestination,
@@ -11354,6 +11432,7 @@ async function startDialerLeadCall({ campaign, lead }) {
       audioUrl
     });
     providerUuid = ariResp?.channelId || null;
+    providerChannelName = ariResp?.channelName || null;
   } catch (err) {
     const msg = err?.message || 'Failed to start ARI outbound call';
     if (DEBUG) console.warn('[dialer.worker] ARI originate failed:', msg);
@@ -11367,6 +11446,7 @@ async function startDialerLeadCall({ campaign, lead }) {
       trackAriCallState(providerUuid, 'campaignId', campaignId);
       trackAriCallState(providerUuid, 'leadId', leadId);
       trackAriCallState(providerUuid, 'userId', userId);
+      if (providerChannelName) trackAriCallState(providerUuid, 'channelName', providerChannelName);
     } catch {}
     try {
       await pool.execute(
