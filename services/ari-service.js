@@ -222,15 +222,9 @@ class AriService {
     }
 
     if (audioUrl) {
-      // Asterisk ARI 'sound:' scheme looks for LOCAL files in the sounds directory.
-      // For remote HTTP/HTTPS URLs, pass the bare URL directly so Asterisk uses
-      // res_media_cache (http/https handler) to fetch and play the file.
-      const ariMedia = audioUrl.startsWith('sound:http://') || audioUrl.startsWith('sound:https://')
-        ? audioUrl.slice(6)  // strip 'sound:' -> bare https://...
-        : audioUrl;
-      console.log(`[ari-service] Playing audio on ${channelId}: ${ariMedia}`);
+      console.log(`[ari-service] Playing audio on ${channelId}: ${audioUrl}`);
       try {
-        const playback = await this.client.channels.play({ channelId, media: ariMedia });
+        const playback = await this.client.channels.play({ channelId, media: audioUrl });
         playback.once('PlaybackFinished', () => {
             console.log(`[ari-service] Playback finished on ${channelId}`);
             setTimeout(() => {
