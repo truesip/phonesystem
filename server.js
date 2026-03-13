@@ -155,6 +155,13 @@ const ARI_CHANNEL_POLL_INTERVAL_MS = Math.max(
   parseInt(process.env.ARI_CHANNEL_POLL_INTERVAL_MS || '1000', 10) || 0
 );
 const ARI_CHANNEL_POLL_HANGUP_GRACE_MS = Math.max(ARI_CHANNEL_POLL_INTERVAL_MS * 2, 2000);
+// Maximum time to wait for a single ARI channels.originate() HTTP call.
+// The ari-client library has no built-in timeout; without this, a slow/unresponsive
+// Asterisk server can block the dialer worker indefinitely per lead.
+const ARI_ORIGINATE_TIMEOUT_MS = Math.max(
+  3000,
+  parseInt(process.env.ARI_ORIGINATE_TIMEOUT_MS || '15000', 10) || 15000
+);
 
 const dialerLeadUpload = multer({
   storage: multer.memoryStorage(),
@@ -687,14 +694,27 @@ async function originateAriCall({ toNumber, fromNumber, audioUrl }) {
     throw new Error('Missing ARI originate parameters');
   }
   const endpoint = `${ARI_DIAL_PREFIX}${toNumber}`;
-  const channel = await ariClientInstance.channels.originate({
-    endpoint,
-    callerId: fromNumber,
-    app: ARI_APP,
-    appArgs: audioUrl,
-    variables: { audio_url: audioUrl }
+  // Race the originate HTTP call against a timeout so a slow/hung Asterisk response
+  // cannot block the dialer worker indefinitely.
+  let _timeoutHandle;
+  const timeoutPromise = new Promise((_, reject) => {
+    _timeoutHandle = setTimeout(() => reject(new Error('ARI originate timeout')), ARI_ORIGINATE_TIMEOUT_MS);
   });
-  return { channelId: channel?.id || null };
+  try {
+    const channel = await Promise.race([
+      ariClientInstance.channels.originate({
+        endpoint,
+        callerId: fromNumber,
+        app: ARI_APP,
+        appArgs: audioUrl,
+        variables: { audio_url: audioUrl }
+      }),
+      timeoutPromise
+    ]);
+    return { channelId: channel?.id || null };
+  } finally {
+    clearTimeout(_timeoutHandle);
+  }
 }
 
 if (ARI_IS_CONFIGURED) {
