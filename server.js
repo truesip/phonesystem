@@ -4383,8 +4383,12 @@ async function convertBufferTo8kMonoWav(buffer) {
     ]);
     return await fs.promises.readFile(outPath);
   } catch (err) {
-    if (DEBUG) console.warn('[dialer.audio] ffmpeg conversion failed; using original buffer:', err?.message || err);
-    return buffer;
+    if (DEBUG) console.warn('[dialer.audio] ffmpeg conversion failed:', err?.message || err);
+    // If conversion fails, DO NOT return original buffer if we can't guarantee format.
+    // However, failing here might block uploads if ffmpeg is broken.
+    // But sending 44k audio breaks Asterisk.
+    // Let's try to detect if it was a critical failure.
+    throw new Error(`Audio conversion failed: ${err.message}`);
   } finally {
     fs.promises.unlink(inPath).catch(() => {});
     fs.promises.unlink(outPath).catch(() => {});
