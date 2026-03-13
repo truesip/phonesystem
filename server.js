@@ -345,6 +345,39 @@ async function ensureDialerCallMetadataForChannel(channelId) {
   return null;
 }
 
+async function cleanupStuckDialerStateOnStartup() {
+  if (!pool) return;
+  try {
+    const [logResult] = await pool.execute(
+      `UPDATE dialer_call_logs
+         SET status = 'error',
+             result = 'failed',
+             notes = CASE
+               WHEN notes IS NULL OR notes = '' THEN 'Reset after restart (missing ARI channel)'
+               ELSE notes
+             END,
+             updated_at = NOW()
+       WHERE status IN ('queued','dialing','ringing')
+         AND created_at < (NOW() - INTERVAL 30 SECOND)`
+    );
+    const [leadResult] = await pool.execute(
+      `UPDATE dialer_leads
+          SET status = 'pending',
+              last_call_at = NULL,
+              updated_at = NOW()
+        WHERE status IN ('queued','dialing')`
+    );
+    if (DEBUG) {
+      console.log('[dialer.cleanup] Reset stuck dialer state', {
+        callLogsUpdated: logResult?.affectedRows || 0,
+        leadsUpdated: leadResult?.affectedRows || 0
+      });
+    }
+  } catch (err) {
+    console.warn('[dialer.cleanup] Failed to reset stuck dialer state:', err?.message || err);
+  }
+}
+
 async function runAriChannelPollTick() {
   if (ariChannelPollRunning) return;
   if (!isAriDialerReady() || !ariClientInstance || !ariClientInstance.channels?.list) {
@@ -18153,7 +18186,7 @@ async function applyDialerCallEvent(rawBody, { source = 'ari' } = {}) {
     }
   }
   if (!callRow) {
-    if (DEBUG) console.warn('[voice.events] call identifier not found', { source, callId });
+    if (DEBUG) console.debug('[voice.events] call identifier not found', { source, callId });
     return { status: 202, ignored: true };
   }
   const callRowId = Number(callRow.id);
@@ -21360,6 +21393,7 @@ async function startServer() {
       sessionMiddleware = session(sessionConfig);
       console.warn('MySQL session store not available; using in-memory sessions');
     }
+    await cleanupStuckDialerStateOnStartup();
 
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Phone.System Signup Server running on port ${PORT}`);
