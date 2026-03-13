@@ -1314,6 +1314,9 @@ async function initDb() {
     enableKeepAlive: true,
     keepAliveInitialDelay: 0
   });
+
+  if (DEBUG) console.log('[db] Pool created.');
+  AriService.init(pool);
   
   // Initialize MySQL session store
   sessionStore = new MySQLStore({
@@ -18407,8 +18410,6 @@ app.post('/webhooks/daily/events', async (req, res) => {
     if (DAILY_DIALIN_WEBHOOK_TOKEN) {
       const token = String(req.query.token || '').trim();
       if (!token || token !== DAILY_DIALIN_WEBHOOK_TOKEN) {
-  if (DEBUG) console.log('[db] Pool created.');
-  AriService.init(pool);
         return res.status(403).json({ success: false, message: 'Forbidden' });
       }
     }
