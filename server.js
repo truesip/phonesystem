@@ -21000,7 +21000,7 @@ async function startServer() {
       sessionMiddleware = session(sessionConfig);
       console.warn('MySQL session store not available; using in-memory sessions');
     }
-    await cleanupStuckDialerStateOnStartup();
+    await AriService.cleanupStuckCalls();
 
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`Phone.System Signup Server running on port ${PORT}`);

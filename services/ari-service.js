@@ -353,6 +353,41 @@ class AriService {
           console.error('[ari-service] Failed to finalize call log:', err.message);
       }
   }
+
+  async cleanupStuckCalls() {
+    if (!this.pool) return;
+    try {
+      // 1. Mark stuck call logs as failed
+      const [logResult] = await this.pool.execute(
+        `UPDATE dialer_call_logs
+           SET status = 'error',
+               result = 'failed',
+               notes = CASE
+                 WHEN notes IS NULL OR notes = '' THEN 'Reset after restart (missing ARI channel)'
+                 ELSE notes
+               END
+         WHERE status IN ('queued','dialing','ringing')
+           AND created_at < (NOW() - INTERVAL 30 SECOND)`
+      );
+
+      // 2. Reset stuck leads to pending so they can be retried
+      const [leadResult] = await this.pool.execute(
+        `UPDATE dialer_leads
+            SET status = 'pending',
+                last_call_at = NULL
+          WHERE status IN ('queued','dialing')`
+      );
+
+      if (DEBUG) {
+        console.log('[ari-service] Reset stuck dialer state', {
+          callLogsUpdated: logResult?.affectedRows || 0,
+          leadsUpdated: leadResult?.affectedRows || 0
+        });
+      }
+    } catch (err) {
+      console.warn('[ari-service] Failed to reset stuck dialer state:', err?.message || err);
+    }
+  }
 }
 
 module.exports = new AriService();
