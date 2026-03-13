@@ -119,6 +119,13 @@ const DIALER_GLOBAL_MAX_DIALOUT = Math.max(0, parseInt(process.env.DIALER_GLOBAL
 const DIALER_MIN_CREDIT = parseFloat(process.env.DIALER_MIN_CREDIT || '0') || 0;
 const DIALER_AUDIO_LIST_LIMIT = Math.max(50, Math.min(500, parseInt(process.env.DIALER_AUDIO_LIST_LIMIT || '500', 10) || 500));
 
+// Asterisk local sounds directory for ARI playback.
+// ARI only supports the 'sound:' scheme (local files) — HTTP/HTTPS schemes are NOT supported.
+// Set ARI_SOUNDS_DIR to the path Asterisk searches for custom sounds, e.g. /var/lib/asterisk/sounds.
+// When set, uploaded audio is also written to ARI_SOUNDS_DIR/custom/<filename> so ARI can play it with sound:custom/<stem>.
+// NOTE: Node.js and Asterisk must share the same filesystem (i.e. run on the same server).
+const ARI_SOUNDS_DIR = (process.env.ARI_SOUNDS_DIR || '').trim();
+
 function clampDialerConcurrencyLimit(raw) {
   const n = parseInt(String(raw ?? ''), 10);
   if (!Number.isFinite(n)) return DIALER_MIN_CONCURRENCY;
@@ -4350,10 +4357,7 @@ function normalizeDialerAudioUrl(uri) {
     if (mediaIdx >= 0 && segments[mediaIdx + 1]) {
       const fileName = segments[mediaIdx + 1];
       const newHttpUrl = `${baseEnv}/media/${fileName}`;
-      // ARI typically needs 'sound:' prefix for file-like playback, even for URLs (if supported by modules)
-      // We preserve it if it was there, or add it if missing?
-      // Actually, let's preserve the prefix preference of the existing data, 
-      // but usually for ARI we WANT sound: prefix if we rely on file playback.
+      // Preserve the 'sound:' prefix if it was already present (used for display/storage).
       return hasSoundPrefix ? `sound:${newHttpUrl}` : newHttpUrl;
     }
   } catch {}
@@ -4416,6 +4420,51 @@ async function fetchLocalDialerAudioFile(fileName) {
     [fileName]
   );
   return rows && rows[0] ? rows[0] : null;
+}
+
+/**
+ * Writes audio data to the Asterisk custom sounds directory so it can be
+ * played via the ARI 'sound:custom/<stem>' URI scheme.
+ * Only runs if ARI_SOUNDS_DIR is configured.
+ */
+async function syncAudioToAriSoundsDir(fileName, data) {
+  if (!ARI_SOUNDS_DIR || !fileName || !data) return false;
+  try {
+    const customDir = path.join(ARI_SOUNDS_DIR, 'custom');
+    await fs.promises.mkdir(customDir, { recursive: true });
+    await fs.promises.writeFile(path.join(customDir, fileName), data);
+    if (DEBUG) console.log(`[ari-sound] Synced ${fileName} to ${customDir}`);
+    return true;
+  } catch (err) {
+    console.warn(`[ari-sound] Failed to write ${fileName} to ${ARI_SOUNDS_DIR}/custom:`, err.message);
+    return false;
+  }
+}
+
+/**
+ * Ensures an audio file exists in the Asterisk custom sounds directory,
+ * fetching from DB if needed. Returns the ARI sound URI (sound:custom/<stem>)
+ * on success, or null if ARI_SOUNDS_DIR is not configured or file not found.
+ */
+async function ensureAriSoundFile(fileName) {
+  if (!ARI_SOUNDS_DIR || !fileName) return null;
+  const customDir = path.join(ARI_SOUNDS_DIR, 'custom');
+  const filePath = path.join(customDir, fileName);
+  // Already on disk?
+  try {
+    await fs.promises.access(filePath);
+  } catch {
+    // Not on disk — fetch from DB and write
+    const row = await fetchLocalDialerAudioFile(fileName);
+    if (!row || !row.data) {
+      if (DEBUG) console.warn(`[ari-sound] File not found in DB: ${fileName}`);
+      return null;
+    }
+    const ok = await syncAudioToAriSoundsDir(fileName, row.data);
+    if (!ok) return null;
+  }
+  const stem = fileName.replace(/\.[^.]+$/, '');
+  return `sound:custom/${stem}`;
 }
 
 async function deleteLocalDialerAudioFile({ userId, fileName }) {
@@ -4552,6 +4601,8 @@ app.post('/api/me/dialer/audio/upload', requireAuth, dialerAudioLibraryUpload.si
       buffer: converted,
       mimeType: 'audio/wav'
     });
+    // Also write to Asterisk local sounds dir if configured (required for ARI playback)
+    await syncAudioToAriSoundsDir(recordingName, converted);
     const playbackUri = buildSoundPlaybackUri(recordingName, req);
     const payload = {
       recordingName,
@@ -10748,7 +10799,23 @@ async function startDialerLeadCall({ campaign, lead }) {
   const userId = Number(campaign.user_id);
   const leadId = Number(lead.id);
   const callerId = normalizeDialerCallerId(campaign.caller_id);
-  const audioUrl = normalizeDialerAudioUrl(String(campaign.audio_playback_uri || '').trim());
+  const rawAudioUri = normalizeDialerAudioUrl(String(campaign.audio_playback_uri || '').trim());
+  let audioUrl = rawAudioUri;
+  // ARI only supports 'sound:' scheme (local files). If ARI_SOUNDS_DIR is set,
+  // ensure the file exists on disk and switch to sound:custom/<stem> URI.
+  if (ARI_SOUNDS_DIR) {
+    const m = rawAudioUri.match(/\/media\/([^/?#]+)/);
+    const audioFileName = m && m[1] ? m[1] : '';
+    if (audioFileName) {
+      const ariUri = await ensureAriSoundFile(audioFileName);
+      if (ariUri) {
+        audioUrl = ariUri;
+        if (DEBUG) console.log(`[dialer.worker] ARI sound URI resolved: ${audioUrl}`);
+      } else {
+        console.warn(`[dialer.worker] Could not sync audio file to ARI sounds dir: ${audioFileName}`);
+      }
+    }
+  }
   const phoneNumber = String(lead.phone_number || '').trim();
 
   if (!phoneNumber || !callerId || !audioUrl) {
