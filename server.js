@@ -593,7 +593,11 @@ function registerAriEventHandlers(client) {
         playback.once('PlaybackFinished', () => {
           setTimeout(() => {
             client.channels.hangup({ channelId }).catch((err) => {
-              if (DEBUG) console.warn('[ari] hangup error:', err?.message || err);
+              // "Channel not found" is a benign race: channel already cleaned up before hangup fired.
+              const msg = String(err?.message || err || '');
+              if (DEBUG && !msg.includes('Channel not found')) {
+                console.warn('[ari] hangup error:', err?.message || err);
+              }
             });
           }, ARI_PLAYBACK_HANGUP_DELAY_MS);
         });
@@ -11389,6 +11393,16 @@ function requestDialerWorkerTick({ reason, immediate = false } = {}) {
         try { clearTimeout(dialerWorkerKickTimer); } catch {}
         dialerWorkerKickTimer = null;
       }
+      // If the worker is already running, avoid piling up setImmediate calls that
+      // all log "tick skipped". Schedule a single debounced follow-up instead so
+      // a new tick is guaranteed once the current one finishes.
+      if (dialerWorkerRunning) {
+        dialerWorkerKickTimer = setTimeout(() => {
+          dialerWorkerKickTimer = null;
+          runDialerWorkerTick().catch(() => {});
+        }, DIALER_SCHEDULER_DEBOUNCE_MS);
+        return;
+      }
       setImmediate(() => {
         runDialerWorkerTick().catch(() => {});
       });
@@ -11405,11 +11419,26 @@ function requestDialerWorkerTick({ reason, immediate = false } = {}) {
 
 
 let dialerWorkerRunning = false;
+let dialerWorkerRunningAt = null;
+// Safety valve: if a tick has been running for longer than this, force-reset the lock.
+// Prevents the worker from being permanently stuck due to a hung DB query or unhandled error.
+const DIALER_WORKER_MAX_RUN_MS = Math.max(
+  30000,
+  parseInt(process.env.DIALER_WORKER_MAX_RUN_MS || '90000', 10) || 90000
+);
 async function runDialerWorkerTick() {
   if (!pool) return;
   if (dialerWorkerRunning) {
-    if (DEBUG) console.log('[dialer.worker] tick skipped (already running)');
-    return;
+    // Safety valve: force-reset if the current tick has exceeded the maximum run time.
+    const runningForMs = dialerWorkerRunningAt ? (Date.now() - dialerWorkerRunningAt) : 0;
+    if (runningForMs > DIALER_WORKER_MAX_RUN_MS) {
+      console.warn('[dialer.worker] force-reset stale lock (running for', Math.round(runningForMs / 1000), 'seconds)');
+      dialerWorkerRunning = false;
+      dialerWorkerRunningAt = null;
+    } else {
+      if (DEBUG) console.log('[dialer.worker] tick skipped (already running)');
+      return;
+    }
   }
 
   // Optional distributed lock: prevents multiple schedulers from overscheduling across instances.
@@ -11442,6 +11471,7 @@ async function runDialerWorkerTick() {
   }
 
   dialerWorkerRunning = true;
+  dialerWorkerRunningAt = Date.now();
   try {
     const [campaigns] = await pool.query(
       `SELECT c.id, c.user_id, c.name, c.caller_id, c.audio_playback_uri, c.concurrency_limit
@@ -11670,6 +11700,7 @@ async function runDialerWorkerTick() {
       if (DEBUG) console.warn('[dialer.worker] tick error:', e?.message || e);
   } finally {
     dialerWorkerRunning = false;
+    dialerWorkerRunningAt = null;
     if (lockConn) {
       try { await lockConn.query('SELECT RELEASE_LOCK(?) AS released', [DIALER_WORKER_DB_LOCK_NAME]); } catch {}
       try { lockConn.release(); } catch {}
