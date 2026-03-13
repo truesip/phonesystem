@@ -1316,7 +1316,9 @@ async function initDb() {
   });
 
   if (DEBUG) console.log('[db] Pool created.');
-  AriService.init(pool);
+  AriService.init(pool, () => {
+    requestDialerWorkerTick({ reason: 'ari-call-ended', immediate: true });
+  });
   
   // Initialize MySQL session store
   sessionStore = new MySQLStore({

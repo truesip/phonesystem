@@ -35,8 +35,9 @@ class AriService {
     this.reconnectTimer = null;
   }
 
-  init(pool) {
+  init(pool, onCallEnded) {
     this.pool = pool;
+    this.onCallEnded = onCallEnded;
     if (this.shouldConnect()) {
       this.connect().catch(err => {
         console.error('[ari-service] Initial connection failed:', err.message);
@@ -348,6 +349,10 @@ class AriService {
                   `UPDATE dialer_leads SET status = ? WHERE id = ? AND user_id = ? LIMIT 1`,
                   [leadStatus, rows[0].lead_id, rows[0].user_id]
               );
+          }
+
+          if (this.onCallEnded) {
+              this.onCallEnded(callId);
           }
       } catch (err) {
           console.error('[ari-service] Failed to finalize call log:', err.message);
